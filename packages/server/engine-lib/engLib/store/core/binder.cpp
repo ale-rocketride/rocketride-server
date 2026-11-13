@@ -120,8 +120,10 @@ Error Binder::callMethods(
             serializeTrace(traceLevel, enterTrace["data"]);
         }
 
-        // Signal to the debugger we are entering a level
+        // Signal to the debugger we are entering a level; the scope ends it
+        // if an exception skips the leave below
         pThis->m_pInstance->pipe->debugger.debugEnter(pInstance, enterTrace);
+        Debugger::PassScope passScope(pThis->m_pInstance->pipe->debugger);
 
         // Break if we need to
         pThis->m_pInstance->pipe->debugger.debugBreak(pThis->m_pInstance,
@@ -158,6 +160,7 @@ Error Binder::callMethods(
             }
 
             // Signal to the debugger we are leaving a level
+            passScope.left();
             pThis->m_pInstance->pipe->debugger.debugLeave(pInstance,
                                                           leaveTrace);
 
@@ -173,6 +176,7 @@ Error Binder::callMethods(
             }
 
             // Signal to the debugger we are leaving a level
+            passScope.left();
             pThis->m_pInstance->pipe->debugger.debugLeave(pInstance,
                                                           leaveTrace);
         }

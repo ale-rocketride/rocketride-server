@@ -60,8 +60,9 @@ of concerns through specialized command handler classes.
 """
 
 import time
-from typing import TYPE_CHECKING, Dict, Any, Union, Optional
+from typing import TYPE_CHECKING, Dict, Any, Union, Optional, Tuple
 from rocketride import EVENT_TYPE
+from ai.common import telemetry
 from ai.common.dap import DAPConn, TransportBase
 from ai.constants import CONST_AUTH_MAX_ATTEMPTS_PER_CONN
 from .commands.cmd_task import TaskCommands
@@ -84,6 +85,18 @@ from ai.account.models import (
     resolve_team_permissions,
 )
 from ai.common.account import AccountPipelineValidation
+
+# WebSocket sign-ins (the DAP auth command): API keys, PATs and session tokens alike
+AUTH_ATTEMPTS = telemetry.Counter(
+    'rocketride.auth.attempts',
+    '{attempt}',
+    'WebSocket sign-ins (auth command), by outcome; unauthenticated: a request before signing in',
+    attributes={
+        'outcome': 'rocketride.auth.outcome',  # success | rejected | too_many_attempts | unauthenticated
+        'error': 'error.type',  # the rejection's code
+        'org': 'rocketride.org.id',
+    },
+)
 
 # Only import for type checking to avoid circular import errors
 if TYPE_CHECKING:
@@ -274,6 +287,16 @@ class TaskConn(
         self._account_info: Optional[AccountInfo] = None
         self._authenticated = False
 
+        # True once the transport reports the connection broke (reset, abort)
+        # rather than closed: rocketride.ws.disconnects reason 'error'
+        self._closed_with_error = False
+
+        # The last organization this connection signed in to (None: never)
+        self._signed_in_org: Optional[str] = None
+
+        # When it opened: how long it stayed open (rocketride.ws.connection.duration)
+        self._opened_mono = time.monotonic()
+
         # Client IP — set by task_server.listen() immediately after construction,
         # used for per-IP unauthenticated connection tracking.
         self._client_ip: str = ''
@@ -309,6 +332,21 @@ class TaskConn(
         # Delegate to the parent transport send implementation
         await super().send(message)
 
+    @property
+    def connection_state(self) -> Tuple[Optional[AccountInfo], Optional[str], bool]:
+        """
+        For the connection metrics (connections.py): the signed-in account (None
+        when not signed in, or signed out), the last organization it signed in to,
+        and whether the connection broke rather than closed.
+        """
+        account = self._account_info if self._authenticated else None
+        return account, self._signed_in_org, self._closed_with_error
+
+    async def on_disconnected(self, reason: Optional[str] = None, has_error: bool = False) -> None:
+        """The transport closed: remember whether it broke, for the disconnect count."""
+        self._closed_with_error = bool(has_error)
+        await super().on_disconnected(reason, has_error)
+
     async def on_receive(self, message: Optional[Dict[str, Any]] = None) -> None:
         """
         Intercept DAP dispatch: allow auth and rrext_public_* commands
@@ -329,6 +367,9 @@ class TaskConn(
             return
 
         if not self._authenticated:
+            # Counted as a sign-in outcome, not as a request: it is refused unhandled
+            AUTH_ATTEMPTS.add(outcome='unauthenticated')
+
             # Send an error and schedule disconnect
             err = self.build_error(message, 'Not authenticated')
             await self.send(err)
@@ -365,6 +406,7 @@ class TaskConn(
         # Count every call (including empty/deauth and re-auth) toward the cap.
         self._auth_attempts += 1
         if self._auth_attempts > CONST_AUTH_MAX_ATTEMPTS_PER_CONN:
+            AUTH_ATTEMPTS.add(outcome='too_many_attempts')
             err = self.build_error(request, 'Too many authentication attempts')
             await self.send(err)
             self._transport.disconnect()
@@ -375,6 +417,7 @@ class TaskConn(
         result = await self._server._server.authenticate_credential(credential)
         if isinstance(result, tuple):
             error_code, error_message = result
+            AUTH_ATTEMPTS.add(outcome='rejected', error=error_code)
             await self._server.broadcast_server_event(
                 EVENT_TYPE.DASHBOARD,
                 {
@@ -399,6 +442,9 @@ class TaskConn(
 
         self._account_info = result
         self._authenticated = True
+        # kept after a sign-out: a close then still counts for this customer
+        self._signed_in_org = telemetry.org_id_of(result) or self._signed_in_org
+        AUTH_ATTEMPTS.add(outcome='success', org=telemetry.org_id_of(result))
         self._server.release_unauthed_slot(self._client_ip)
 
         # Capture optional client identification from auth arguments
@@ -637,6 +683,31 @@ class TaskConn(
         # Permission checks are deferred to get_task() / callers where the
         # task's team is known, so we can resolve against the correct team.
         return token
+
+    def request_identity(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Who made a request (DAPConn.request_identity): org, client kind, connection, the run it is about."""
+        try:
+            from . import connections
+
+            client, org, _user = connections.owner(self)
+            identity: Dict[str, Any] = {
+                'org_id': org or self._signed_in_org or '',
+                'client': client,
+                'connection_id': str(self._connection_id),
+            }
+            # The run the request names (its token, or the run its key is locked to):
+            # its task id, never the token itself
+            account = self._account_info if self._authenticated else None
+            args = message.get('arguments') or {}
+            token = args.get('token') or message.get('token')
+            if account is not None and (account.auth or '').startswith('tk_'):
+                token = account.auth
+            control = self._server._task_control.get(token) if isinstance(token, str) and token else None
+            if control is not None and control.id:
+                identity['task_id'] = control.id
+            return identity
+        except Exception:
+            return {}
 
     def get_task(self, request: Dict[str, Any], permissions: str = '') -> 'Task':
         """

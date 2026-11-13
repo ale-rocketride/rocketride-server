@@ -17,16 +17,21 @@ Classes:
 """
 
 import asyncio
+import logging
 import time
 import uuid
 import psutil
 from typing import Optional, TYPE_CHECKING, Callable
 from rocketlib import debug
+from ai.common import telemetry
 from ai.constants import (
     CONST_METRICS_SAMPLE_INTERVAL,
     CONST_BILLING_REPORT_INTERVAL,
     CONST_METRICS_STOP_TIMEOUT,
 )
+
+# Billing failures (usage not recorded or reported): ERROR lines
+_BILLING_LOG = logging.getLogger('rocketride.billing')
 
 if TYPE_CHECKING:
     from rocketride import TASK_STATUS
@@ -565,8 +570,13 @@ class TaskMetrics:
                     context=context,
                     description=description,
                 )
-        except Exception as e:
-            debug(f'[TaskMetrics] Error writing to billing ledger: {e}')
+        except Exception:
+            # usage not billed: an ERROR line (the errors-only log pipeline keeps it)
+            _BILLING_LOG.error(
+                'billing: writing usage to the ledger failed',
+                exc_info=True,
+                extra={'org_id': self.org_id, 'error_type': 'ledger_write_failed'},
+            )
 
     async def _monitoring_loop(self) -> None:
         """
@@ -606,9 +616,13 @@ class TaskMetrics:
                         try:
                             await self._report_to_billing_system()
                             self._last_report_time = current_time
-                        except Exception as e:
+                        except Exception:
                             # Log error but don't crash monitoring loop
-                            debug(f'[TaskMetrics] Error sending billing report: {e}')
+                            _BILLING_LOG.error(
+                                'billing: sending the usage report failed',
+                                exc_info=True,
+                                extra={'org_id': self.org_id, 'error_type': 'report_failed'},
+                            )
                             # Still update report time to avoid continuous retry
                             self._last_report_time = current_time
 
@@ -663,7 +677,7 @@ class TaskMetrics:
 
             # Start monitoring
             self._stop_monitoring.clear()
-            self._monitoring_task = asyncio.create_task(self._monitoring_loop())
+            self._monitoring_task = asyncio.create_task(self._monitoring_loop(), context=telemetry.detached_context())
 
     async def stop_monitoring(self) -> None:
         """
@@ -740,5 +754,9 @@ class TaskMetrics:
                 },
                 org_id=self.org_id,
             )
-        except Exception as e:
-            debug(f'[TaskMetrics] Error writing usage audit: {e}')
+        except Exception:
+            _BILLING_LOG.error(
+                'billing: writing the usage audit failed',
+                exc_info=True,
+                extra={'org_id': self.org_id, 'error_type': 'audit_write_failed'},
+            )

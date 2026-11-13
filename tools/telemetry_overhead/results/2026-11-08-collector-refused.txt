@@ -1,0 +1,17 @@
+== llm collector down (5570)
+round 1 port 5567 {"n": 1200, "p50_ms": 137.01, "p95_ms": 143.84} cpu_ticks=8199
+round 1 port 5570 {"n": 1200, "p50_ms": 138.18, "p95_ms": 146.76} cpu_ticks=8624
+round 1 port 5568 {"n": 1200, "p50_ms": 138.49, "p95_ms": 147.54} cpu_ticks=8285
+round 2 port 5570 {"n": 1200, "p50_ms": 138.23, "p95_ms": 147.35} cpu_ticks=8627
+round 2 port 5568 {"n": 1200, "p50_ms": 139.03, "p95_ms": 147.86} cpu_ticks=8761
+round 2 port 5567 {"n": 1200, "p50_ms": 136.92, "p95_ms": 143.65} cpu_ticks=7948
+round 3 port 5568 {"n": 1200, "p50_ms": 139.08, "p95_ms": 148.96} cpu_ticks=8540
+round 3 port 5567 {"n": 1200, "p50_ms": 136.3, "p95_ms": 143.18} cpu_ticks=7885
+round 3 port 5570 {"n": 1200, "p50_ms": 143.19, "p95_ms": 161.08} cpu_ticks=9418
+== errors in 5570 log
+34
+[otel] WARNING opentelemetry.exporter.otlp.proto.http.metric_exporter: Transient error HTTPConnectionPool(host='127.0.0.1', port=9): Max retries exceeded with url: /v1/metrics (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=9): Failed to establish a new connection: [Errno 111] Connection refused")) encountered while exporting metrics batch, retrying in 1.02s.
+[otel] ERROR opentelemetry.exporter.otlp.proto.http.metric_exporter: Failed to export metrics batch due to timeout, max retries or shutdown.
+INFO:     connection open
+INFO:     connection open
+INFO:     connection open

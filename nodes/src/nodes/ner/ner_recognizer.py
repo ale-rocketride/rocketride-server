@@ -31,6 +31,7 @@ RocketRide model server's transformers pipeline support.
 from typing import Dict, Any, List
 from ai.common.config import Config
 from ai.common.models.transformers import pipeline
+from rocketlib import error
 
 
 class NERRecognizer:
@@ -122,7 +123,7 @@ class NERRecognizer:
             return formatted_entities
 
         except Exception as e:
-            print(f'[NER] Error extracting entities: {str(e)}')
+            error(f'[NER] Error extracting entities: {str(e)}')
             return []
 
     def get_entity_summary(self, entities: List[Dict[str, Any]]) -> Dict[str, List[str]]:

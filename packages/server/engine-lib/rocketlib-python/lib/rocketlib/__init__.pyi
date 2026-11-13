@@ -602,6 +602,8 @@ class IServiceFilterPipe(Protocol):
     currentObject: Entry
     pipeType: 'IServiceFilterPipe.IServiceFilterInstance_PipeType'
     pipeId: int
+    #: The trace id of the pass this call belongs to (32 hex chars; telemetry)
+    passTraceId: str
     next: Optional['IServiceFilterPipe']
     targetObjectPath: str
     targetObjectUrl: str

@@ -255,3 +255,39 @@ class TestSignalCapture:
             pass
 
         assert calls == [(handled_signal, fake_server.handle_exit)]
+
+
+async def test_an_authenticator_that_raises_is_a_server_error_logged_at_error(caplog):
+    """A store or identity provider failing inside an authenticator is ours: 500 and an ERROR line, not the user's 400."""
+    import logging
+
+    from ai.web.server import WebServer
+
+    async def broken(authorization):
+        raise ConnectionError('account store unreachable')
+
+    server = WebServer.__new__(WebServer)
+    server._authenticators = [broken]
+    with caplog.at_level(logging.ERROR, logger='rocketride.auth'):
+        result = await server._authenticate_credential_inner('rr_somekey')
+    assert result == (500, 'Authentication service error')
+    (record,) = [r for r in caplog.records if r.name == 'rocketride.auth']
+    assert record.exc_info and record.auth_stage == 'authenticator'
+
+
+async def test_a_run_key_naming_no_live_run_is_the_callers_401_not_ours(caplog):
+    """After a restart an app keeps its old tk_ key: the credential's problem, never a 500 or an ERROR line."""
+    import logging
+
+    from ai.modules.task.types import TaskError
+    from ai.web.server import WebServer
+
+    async def stale(authorization):
+        raise TaskError(TaskError.NOT_REGISTERED, 'Your pipeline is not running')
+
+    server = WebServer.__new__(WebServer)
+    server._authenticators = [stale]
+    with caplog.at_level(logging.ERROR, logger='rocketride.auth'):
+        result = await server._authenticate_credential_inner('tk_oldkey')
+    assert result == (401, 'Authentication failed')
+    assert not [r for r in caplog.records if r.name == 'rocketride.auth']

@@ -23,7 +23,7 @@
 
 from .IGlobal import IGlobal
 from ai.common.llm_base import LLMBase
-from rocketlib import AVI_ACTION, warning
+from rocketlib import AVI_ACTION, warning, error
 from ai.common.schema import Doc
 from ai.common.avi.descriptor import rename_ext
 
@@ -112,7 +112,7 @@ class IInstance(LLMBase):
             try:
                 answer = self.IGlobal._chat.chat(question)
             except Exception as e:
-                warning(f'Ollama Vision: inference failed for chunk {doc.metadata.chunkId}: {e}')
+                error(f'Ollama Vision: inference failed for chunk {doc.metadata.chunkId}: {e}')
                 continue
 
             # Emit a text Doc preserving the original metadata (chunkId, time_stamp, etc.)

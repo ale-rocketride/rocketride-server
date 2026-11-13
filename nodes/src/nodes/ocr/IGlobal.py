@@ -25,7 +25,7 @@ import os
 import io
 import threading
 from typing import List, Tuple, Any
-from rocketlib import IGlobalBase, debug, warning
+from rocketlib import IGlobalBase, debug, error
 from ai.common.config import Config
 
 from depends import depends
@@ -163,7 +163,7 @@ class ModelServerOCR(OCRInstance):
             import traceback
 
             # swallowed so a page failure cannot kill the whole document, but must stay visible
-            warning(f'OCR content() failed: {e}\n{traceback.format_exc()}')
+            error(f'OCR content() failed: {e}\n{traceback.format_exc()}')
 
         return all_results
 
@@ -204,7 +204,7 @@ class ModelServerOCR(OCRInstance):
         except Exception as e:
             import traceback
 
-            debug(f'ModelServerOCR.of() error: {e}\n{traceback.format_exc()}')
+            error(f'ModelServerOCR.of() error: {e}\n{traceback.format_exc()}')
             return None
 
         return OCRData(records=records) if records else None

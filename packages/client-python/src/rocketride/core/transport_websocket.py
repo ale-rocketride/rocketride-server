@@ -76,6 +76,10 @@ except ImportError:
 
 from .transport import TransportBase
 
+# Close codes of a normal close: 1000 normal, 1001 going away, 1005 none given.
+# Any other (1006: the connection dropped without a close frame) is a broken one.
+NORMAL_CLOSE_CODES = (1000, 1001, 1005)
+
 
 def _headers_keyword() -> str:
     """
@@ -155,6 +159,13 @@ class TransportWebSocket(TransportBase):
         self._headers = headers
         self._message_tasks: set = set()
         self._draining: bool = False
+        # disconnect() was called: the close is ours, whatever the socket reports
+        self._closed_by_us: bool = False
+        # How the last connection ended, for the server's telemetry: the WebSocket close
+        # code (None: no close frame, the connection broke) and who ended it
+        # ('server': this side, 'client': the peer, 'network': a reset or an error)
+        self.close_code: Optional[int] = None
+        self.closed_by: Optional[str] = None
 
     def get_connection_info(self) -> Optional[str]:
         """Return connection info for the "connected" callback (URI)."""
@@ -294,7 +305,8 @@ class TransportWebSocket(TransportBase):
 
                     if message['type'] == 'websocket.disconnect':
                         if fastapi and WebSocketDisconnect:
-                            raise WebSocketDisconnect('Connection closed')
+                            # the close code tells a normal close from a dropped connection (1006)
+                            raise WebSocketDisconnect(code=message.get('code', 1000))
                         else:
                             raise ConnectionError('Connection closed')
 
@@ -415,6 +427,7 @@ class TransportWebSocket(TransportBase):
 
             self._connected = True
             self._draining = False
+            self._closed_by_us = False
             self._debug_message(f'Successfully connected to {self._uri}')
 
             # Start background receive task — _run_receive_task owns its cleanup
@@ -471,6 +484,8 @@ class TransportWebSocket(TransportBase):
             self._websocket = websocket
             self._connected = True
             self._draining = False
+            self._closed_by_us = False
+            self.close_code = self.closed_by = None
 
             client_info = (
                 f'ws://{websocket.client.host}:{websocket.client.port}' if websocket.client else 'ws://unknown'
@@ -482,14 +497,22 @@ class TransportWebSocket(TransportBase):
 
         except Exception as e:
             if fastapi and WebSocketDisconnect and isinstance(e, WebSocketDisconnect):
-                reason = 'Connection closed'
-                has_error = False
+                code = getattr(e, 'code', 1000)
+                reason = 'Connection closed' if code in NORMAL_CLOSE_CODES else f'Connection closed ({code})'
+                has_error = code not in NORMAL_CLOSE_CODES and not self._closed_by_us
+                self.close_code = code
+                self.closed_by = 'server' if self._closed_by_us else 'client'
             elif isinstance(e, (ConnectionResetError, ConnectionAbortedError)):
                 reason = f'Connection error: {e}'
+                # a reset is the network's, even while we were closing: broken
                 has_error = True
+                self.close_code, self.closed_by = None, 'network'
             else:
                 reason = f'Accept error: {e}'
-                has_error = True
+                # after our own close the framework may raise instead of reporting a
+                # disconnect: still our close, not a broken connection
+                has_error = not self._closed_by_us
+                self.close_code, self.closed_by = None, 'server' if self._closed_by_us else 'network'
 
         finally:
             # _receive_loop has exited — socket is already closed (disconnect()
@@ -498,6 +521,8 @@ class TransportWebSocket(TransportBase):
             # responses before we tear down and notify disconnection.
             self._connected = False
             self._draining = False
+            if self.closed_by is None:
+                self.closed_by = 'server' if self._closed_by_us else 'client'
             await self._drain_message_tasks()
             await self._close_websocket()
             await self._transport_disconnected(reason, has_error)
@@ -559,6 +584,7 @@ class TransportWebSocket(TransportBase):
         # Set draining synchronously before any event-loop switch so the
         # receive loop stops creating new tasks immediately.
         self._draining = True
+        self._closed_by_us = True
         return asyncio.create_task(self._do_disconnect())
 
     async def send(self, message: Dict[str, Any]) -> None:

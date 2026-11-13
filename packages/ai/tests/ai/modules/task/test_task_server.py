@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ai.modules.task.lost_runs import LostRuns
 from ai.modules.task import task_server as task_server_module
 from ai.modules.task.task_server import TaskServer
 from ai.modules.task.types import TaskError
@@ -50,6 +51,7 @@ def _make_server(*, config=None, web_server=None):
     """
     ts = TaskServer.__new__(TaskServer)
     ts._task_control = {}
+    ts._lost_runs = LostRuns()
     ts._connections = {}
     ts._connection_id = 0
     ts._unauthed_by_ip = {}
@@ -1367,3 +1369,39 @@ async def test_start_task_without_a_source_component_says_how_to_add_one():
     message = str(excinfo.value)
     assert message == 'Pipeline has no source. Select a source component or add a node configured as a source.'
     assert ts._task_control == {}
+
+
+def test_a_live_run_refused_its_public_key_is_not_a_lost_run(monkeypatch):
+    """A pk_ of a live run that is not a public endpoint is refused, but its run is not lost."""
+    import ai.modules.task.task_server as task_server_module
+
+    ts = _make_server()
+    refused = []
+    monkeypatch.setattr(ts._lost_runs, 'refused', refused.append)
+    monkeypatch.setattr(task_server_module, 'public_key_reaches', lambda control: False)
+    ts._task_control['tk_live'] = SimpleNamespace(public_auth='pk_live')
+    with pytest.raises(TaskError):
+        ts.get_task_control_by_public_key('pk_live')
+    with pytest.raises(TaskError):
+        ts.get_task_control_by_public_key('pk_gone')
+    assert refused == ['pk_gone']
+
+
+def test_live_identities_leave_out_finished_runs_still_registered():
+    """A finished run stays registered for its cleanup delay: it is not in progress, so never counted lost."""
+    from types import SimpleNamespace
+
+    def task(task_id, complete):
+        return SimpleNamespace(
+            id=task_id,
+            is_task_complete=lambda: complete,
+            _telemetry_identity=lambda: {'org_id': 'org-a', 'run_kind': 'deploy', 'project_id': 'p'},
+        )
+
+    ts = _make_server()
+    ts._task_control = {
+        'a': SimpleNamespace(task=task('tok.running', False)),
+        'b': SimpleNamespace(task=task('tok.done', True)),
+        'c': SimpleNamespace(task=None),
+    }
+    assert [i['task_id'] for i in ts.live_identities()] == ['tok.running']

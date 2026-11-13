@@ -48,6 +48,7 @@ Usage::
     server.run()  # blocking — use server.serve() inside an async context
 """
 
+import logging
 import os
 import signal
 import sys
@@ -68,6 +69,9 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.routing import compile_path
 from rocketlib import debug
 from rocketride import CONST_WS_PING_INTERVAL, CONST_WS_PING_TIMEOUT
+
+# Sign-in failures on our side (an authenticator raising): ERROR lines
+_AUTH_LOG = logging.getLogger('rocketride.auth')
 from ai.constants import CONST_DEFAULT_WEB_PORT, CONST_DEFAULT_WEB_HOST, CONST_WEB_WS_MAX_SIZE
 from ai.web import exception, error, Result
 from ai.account import account, AccountInfo, Reporter
@@ -491,9 +495,16 @@ class WebServer:
         # back to CONST_DEFAULT_SIGNING_KEY (a self-describing development
         # value) so a fresh install works out of the box.
 
-        # Setup the Uvicorn configuration
+        # Setup the Uvicorn configuration. RR_LOG_FORMAT=json logs JSON lines;
+        # otherwise uvicorn's own configuration, unchanged
+        from ai.common import logfmt
+
+        log_config = logfmt.uvicorn_log_config()
+        # every module's ERROR as a JSON line (sign-in, billing, stores): the log pipeline keeps it
+        logfmt.install_error_handler()
         config = uvicorn.Config(
             self.app,
+            **({'log_config': log_config} if log_config else {}),
             log_level='info',
             host=host,
             port=port,
@@ -576,9 +587,22 @@ class WebServer:
                 debug(f'auth: PermissionError from authenticator: {str(e)}')
                 return (401, 'Authentication failed')
             except Exception as e:
-                # Authenticator raised an unexpected error — treat as a bad-request failure
-                debug(f'auth: authenticator raised unexpected error: {str(e)}')
-                return (400, 'Bad request')
+                from ai.modules.task.types import TaskError
+
+                if isinstance(e, TaskError):
+                    # A run key naming no live run (stopped, replaced, an engine
+                    # restart): the caller's credential, not our failure
+                    debug(f'auth: run key not recognised: {e.code}')
+                    return (401, 'Authentication failed')
+                # Our failure (a store, the identity provider, a bug), not the
+                # caller's: an ERROR line with the traceback, and a 5xx so the
+                # sign-in SLO counts it
+                _AUTH_LOG.error(
+                    'auth: an authenticator failed (not the credential)',
+                    exc_info=True,
+                    extra={'auth_stage': 'authenticator', 'error_type': 'authenticator_error'},
+                )
+                return (500, 'Authentication service error')
 
         # No registered authenticator matched; fall back to the built-in account authenticator
         try:

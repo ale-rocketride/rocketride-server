@@ -98,6 +98,14 @@ await client.connect()
 Use `on_disconnected` for "we were connected and then dropped"; use
 `on_connect_error` for "failed to connect".
 
+## Distributed tracing
+
+When your application uses OpenTelemetry and a span is active, every request the
+client sends carries that span's W3C `traceparent`, and the server records the
+request as a child span in your trace. `opentelemetry-api` is not a dependency:
+without it, nothing is added. Set `ROCKETRIDE_TRACE_PROPAGATION=false` to turn
+this off. See [Telemetry](/operate/self-hosting/telemetry#tracing-from-your-application).
+
 ## Inspecting state
 
 `get_connection_info()` returns `{'connected': bool, 'transport': str, 'uri': str}`

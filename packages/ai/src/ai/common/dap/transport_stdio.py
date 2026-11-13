@@ -90,10 +90,30 @@ Usage Patterns:
 """
 
 import json
+import re
 import asyncio
 from typing import Dict, Any, Optional
 from ai.constants import CONST_TRANSPORT_PROCESS_WAIT_TIMEOUT
+from ai.common import telemetry
 from . import TransportBase
+
+
+# The engine writes '>EXIT*<code>*<message>*<location>...': <code> is the name of
+# the engine error code (e.g. InvalidSchema, InvalidParam, Exception), or 0 on
+# success. exitCode stays the number every consumer compares with 0; the name is
+# passed on as errorCode when it is one, so the run outcome can tell a refused
+# pipeline from a platform failure (ai.modules.task.run_outcome).
+_ERROR_CODE_NAME = re.compile(r'^[A-Za-z_]{1,32}$')
+
+
+def _exit_body(code_field: str, exit_code: int, message: str) -> Dict[str, Any]:
+    body: Dict[str, Any] = {'exitCode': exit_code, 'message': message}
+    try:
+        int(code_field, 16)  # a number: the older form, no name to pass on
+    except ValueError:
+        if exit_code != 0 and _ERROR_CODE_NAME.match(code_field or ''):
+            body['errorCode'] = code_field
+    return body
 
 
 class TransportStdio(TransportBase):
@@ -200,11 +220,15 @@ class TransportStdio(TransportBase):
 
             # Start stream monitoring tasks in background
             if self._process.stdout:
-                self._stdout_task = asyncio.create_task(self._read_stream(self._process.stdout, 'stdout'))
+                self._stdout_task = asyncio.create_task(
+                    self._read_stream(self._process.stdout, 'stdout'), context=telemetry.detached_context()
+                )
                 self._debug_message('Started stdout monitoring task')
 
             if self._process.stderr:
-                self._stderr_task = asyncio.create_task(self._read_stream(self._process.stderr, 'stderr'))
+                self._stderr_task = asyncio.create_task(
+                    self._read_stream(self._process.stderr, 'stderr'), context=telemetry.detached_context()
+                )
                 self._debug_message('Started stderr monitoring task')
 
             if not self._stdout_task and not self._stderr_task:
@@ -279,12 +303,16 @@ class TransportStdio(TransportBase):
             tasks = []
 
             if self._process.stdout:
-                self._stdout_task = asyncio.create_task(self._read_stream(self._process.stdout, 'stdout'))
+                self._stdout_task = asyncio.create_task(
+                    self._read_stream(self._process.stdout, 'stdout'), context=telemetry.detached_context()
+                )
                 tasks.append(self._stdout_task)
                 self._debug_message('Started stdout monitoring task')
 
             if self._process.stderr:
-                self._stderr_task = asyncio.create_task(self._read_stream(self._process.stderr, 'stderr'))
+                self._stderr_task = asyncio.create_task(
+                    self._read_stream(self._process.stderr, 'stderr'), context=telemetry.detached_context()
+                )
                 tasks.append(self._stderr_task)
                 self._debug_message('Started stderr monitoring task')
 
@@ -828,6 +856,15 @@ class TransportStdio(TransportBase):
                 )
 
         # Parse channel signals: '>CHN*state' or '>CHN*state*connection_id'
+        # Dependency calls a node made, relayed for telemetry: '>SPN*[json, ...]' (ai.common.telemetry.relay)
+        elif message.startswith('>SPN*'):
+            try:
+                calls = json.loads(message[5:])
+            except ValueError:
+                calls = None
+            if isinstance(calls, list):
+                await self._transport_receive({'type': 'event', 'event': 'apaevt_dependency', 'body': {'calls': calls}})
+
         elif message.startswith('>CHN*'):
             parts = message.split('*')
             await self._transport_receive(
@@ -906,7 +943,8 @@ class TransportStdio(TransportBase):
                         {
                             'type': 'event',
                             'event': 'apaevt_exit',
-                            'body': {'exitCode': exitCode, 'message': exitMessage, 'crash': crash},
+                            # the engine's error code name (_exit_body) and whether it crashed
+                            'body': {**_exit_body(s_exitCode, exitCode, exitMessage), 'crash': crash},
                         }
                     )
                     if crash:
@@ -933,7 +971,7 @@ class TransportStdio(TransportBase):
                         {
                             'type': 'event',
                             'event': 'apaevt_exit',
-                            'body': {'exitCode': exitCode, 'message': exitMessage},
+                            'body': _exit_body(s_exitCode, exitCode, exitMessage),
                         }
                     )
 

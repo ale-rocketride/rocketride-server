@@ -118,6 +118,7 @@ void IServiceFilterInstance::cb_control(std::string &classType,
             }
 
             this->pipe->debugger.debugEnter(filter.get(), enterTrace);
+            Debugger::PassScope passScope(this->pipe->debugger);
 
             ccode = filter->control(control);
 
@@ -136,6 +137,7 @@ void IServiceFilterInstance::cb_control(std::string &classType,
                         control.attr("model_dump")());
             }
 
+            passScope.left();
             this->pipe->debugger.debugLeave(filter.get(), leaveTrace);
 
             if (ccode) throw ccode;
@@ -164,6 +166,8 @@ void IServiceFilterInstance::cb_control(std::string &classType,
         }
 
         this->pipe->debugger.debugEnter(filter.get(), enterTrace);
+        // Ends the level if an exception skips every leave below
+        Debugger::PassScope passScope(this->pipe->debugger);
 
         // Call the control function
         ccode = filter->control(control);
@@ -183,6 +187,7 @@ void IServiceFilterInstance::cb_control(std::string &classType,
             }
 
             // And inform we are leaving
+            passScope.left();
             this->pipe->debugger.debugLeave(filter.get(), leaveTrace);
             return;
         }
@@ -202,6 +207,7 @@ void IServiceFilterInstance::cb_control(std::string &classType,
             }
 
             // And inform we are leaving
+            passScope.left();
             this->pipe->debugger.debugLeave(filter.get(), leaveTrace);
             continue;
         }
@@ -216,6 +222,7 @@ void IServiceFilterInstance::cb_control(std::string &classType,
             leaveTrace["error"] = ccode.message();
         }
 
+        passScope.left();
         this->pipe->debugger.debugLeave(filter.get(), leaveTrace);
         throw ccode;
     }
