@@ -38,6 +38,7 @@ from rocketlib import debug, error, warning
 from ai.common.agent import AgentBase, AgentContext
 from ai.common.agent.types import AgentRunResult
 from ai.common.config import Config
+from ai.common.llm_base import report_llm_failure
 from ai.common.schema import Question
 
 from ai.common.utils import safe_str
@@ -236,11 +237,20 @@ class RocketRideDriver(AgentBase):
                     verify_args=self._verify_args,
                 )
             except Exception as exc:
-                error(f'rocketride wave plan failed run_id={run_id}: {exc}')
                 trace['stop_reason'] = 'error'
                 trace['error'] = f'{type(exc).__name__}: {exc}'
                 # A retry that failed after an unusable reply carries that reply's notes.
                 current_scratch = safe_str(getattr(exc, 'wave_scratch', '')) or current_scratch
+                # One ERROR line with why (provider down, the customer's key, our
+                # request) and the question's trace. The question is marked failed
+                # only when the user gets the error: an answer from the work
+                # already gathered is an answer
+                report_llm_failure(
+                    f'rocketride wave plan failed run_id={run_id}',
+                    exc,
+                    instance=getattr(context, 'invoker', None),
+                    mark=not waves and not current_scratch,
+                )
                 if not waves and not current_scratch:
                     # Nothing was gathered, so there is nothing to save; the cause
                     # (a bad key, a rate limit, an unreadable reply) is the useful part.
@@ -624,6 +634,7 @@ class RocketRideDriver(AgentBase):
         except Exception as exc:
             # The model cannot be reached for the answer either. Hand the user what
             # was gathered, as it stands, rather than only the error.
+            error(f'agent: final answer model call failed, returning a partial report: {type(exc).__name__}: {exc}')
             return _partial_report(f'the model call failed ({type(exc).__name__}: {exc})', lines, scratch)
         if not safe_str(answer).strip():
             # An empty reply is no answer either; the gathered facts still are.

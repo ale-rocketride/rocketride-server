@@ -412,6 +412,32 @@ async def test_exit_message_three_fields_unknown_token_maps_to_one():
     assert disconnects[0]['has_error'] is True
 
 
+@pytest.mark.parametrize(
+    'line, exit_code, error_code',
+    [
+        # What the engine writes (engLib/monitor/App.hpp): the error code's name first
+        ('>EXIT*InvalidSchema*The service no_such_node was not found*services.cpp:2,103', 1, 'InvalidSchema'),
+        ('>EXIT*InvalidParam*Component x_1 input has unknown lane x*pipeline_config.cpp:167', 1, 'InvalidParam'),
+        ('>EXIT*Exception*Missing credentials*a*b.py:231', 1, 'Exception'),
+        ('>EXIT*Python*Python error*init.cpp:647', 1, 'Python'),
+        # A message holding '*' stays in the message; the code is still the first field
+        ('>EXIT*Exception*a * b*x.py:1', 1, 'Exception'),
+        # Not a code name: no errorCode (free text never becomes one)
+        ('>EXIT*not a code*msg*x', 1, None),
+        # Success and the numeric forms are unchanged
+        ('>EXIT*0*', 0, None),
+        ('>EXIT*FF*failed', 0xFF, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_exit_keeps_the_engine_error_code_name(line, exit_code, error_code):
+    """The numeric exitCode is unchanged for every consumer; the code's name is passed on as errorCode."""
+    events, _ = await _drive(line)
+    body = _single_event(events)['body']
+    assert body['exitCode'] == exit_code
+    assert body.get('errorCode') == error_code
+
+
 @pytest.mark.asyncio
 async def test_exit_message_too_short_dispatches_incomplete_event_and_disconnect():
     """'>EXIT*' (matches the prefix but lacks fields) hits the incomplete-exit branch."""

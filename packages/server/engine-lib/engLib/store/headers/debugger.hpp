@@ -23,6 +23,9 @@
 
 #pragma once
 
+#include <mutex>
+#include <string>
+
 namespace engine::store {
 namespace py = pybind11;
 
@@ -190,6 +193,47 @@ public:
     // Get the task id of the associated debugger endpoint
     std::string getTaskId() const noexcept;
 
+    /**
+     * @brief The trace id of the pass this pipe is running (32 hex chars).
+     *
+     * A pass is one run of the pipeline over an object on this pipe: it
+     * begins with the outermost debugEnter and ends with its debugLeave, as
+     * EaaS's telemetry counts it. Only with --otel_pass_ids (EaaS passes it
+     * while telemetry is on): the id is new for each pass and sent as "tid"
+     * with every ENTER/LEAVE event; Python nodes read it as
+     * instance.passTraceId, so a call they make (the model server) can carry
+     * it and be traced inside the pipeline's trace. Empty otherwise, and
+     * between passes.
+     */
+    std::string passTraceId() const noexcept;
+
+    /// Ends the level a debugEnter began when its debugLeave will not come
+    /// (an exception between them): no event, but the pass ends. See PassScope.
+    void debugUnwind() noexcept;
+
+    /**
+     * @brief Pairs a debugEnter with its end on every path: declared right
+     * after debugEnter, left() right before debugLeave; if the scope unwinds
+     * without it (an exception), debugUnwind ends the level instead.
+     */
+    class PassScope {
+    public:
+        explicit PassScope(Debugger &debugger) noexcept
+            : m_debugger(debugger) {}
+        ~PassScope() {
+            if (!m_left) m_debugger.debugUnwind();
+        }
+        PassScope(const PassScope &) = delete;
+        PassScope &operator=(const PassScope &) = delete;
+
+        /// debugLeave is about to be called: nothing to undo
+        void left() noexcept { m_left = true; }
+
+    private:
+        Debugger &m_debugger;
+        bool m_left = false;
+    };
+
     /// Stop task execution immediately.
     void taskStop() noexcept;
 
@@ -242,8 +286,26 @@ private:
     void _outputBreakpoint(const std::string &msg,
                            const Breakpoint &bp) noexcept;
 
+    // A new pass trace id (32 hex chars; not cryptographic: an identifier)
+    static std::string newPassTraceId() noexcept;
+
+    // The serialized trace with "tid" added (see debugger.cpp)
+    static std::string withPassTraceId(std::string trace,
+                                       const std::string &traceId);
+
+    // One level less; ends the pass at zero (under m_passLock)
+    void endLevelLocked() noexcept;
+
     /// Tracks the recursion level of nested debugEnter/debugLeave calls.
+    /// With pass ids on (--otel_pass_ids) it decides where a pass begins and
+    /// ends, so it changes under m_passLock together with the pass's id:
+    /// reentrant sub-invocations enter and leave from other threads.
     int m_recurseLevel = 0;
+
+    /// The current pass's trace id (passTraceId), and the lock it shares with
+    /// the level: node threads read it while the pipe's thread starts the next
+    std::string m_passTraceId;
+    mutable std::mutex m_passLock;
 
     /// Collection of encoded breakpoint identifiers (e.g., ("A", "B", "text")
     std::mutex m_breakpoint_lock;  ///< Mutex for guarding breakpoint list

@@ -1,0 +1,8 @@
+# bench_relay.py after the pass scope moved into the OpenTelemetry context (threads keep their pass), 2026-11-09
+#  15:25:30 up  6:57,  0 users,  load average: 1.03, 1.89, 1.94
+node handler call                        before   0.07 us  after   2.43 us  added  2.35 us
+one relayed dependency call                3.89 us
+node handler call                        before   0.08 us  after   2.26 us  added  2.19 us
+one relayed dependency call                3.84 us
+node handler call                        before   0.07 us  after   2.40 us  added  2.32 us
+one relayed dependency call                3.99 us

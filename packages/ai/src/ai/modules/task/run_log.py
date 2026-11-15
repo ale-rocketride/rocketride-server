@@ -70,6 +70,7 @@ from ai.constants import (
 )
 
 from ai.account.store import StorageNotFoundError
+from ai.common import telemetry
 
 if TYPE_CHECKING:
     from ai.account.file_store import FileStore
@@ -604,6 +605,10 @@ class RunLogWriter:
                     # Never end a chapter before it began (clock edge cases).
                     chapter['endTime'] = max(dangling_end, float(chapter.get('beginTime') or 0))
                     chapter['outcome'] = 'interrupted'
+            # A dangling chapter is a run its EaaS died under. It is counted
+            # (engine_lost) by LiveRuns when the engine's death is noticed, not
+            # here: here it would be late (only when the same pipeline runs
+            # again) and counted twice.
             chapters.append(
                 {
                     'beginTime': begin['body']['eventTime'],
@@ -626,7 +631,7 @@ class RunLogWriter:
             WRITERS[writer_key(self._scope_id, self._stream)] = self
 
             # Background worker: backstop seal + upload drain + retention.
-            self._worker = asyncio.create_task(self._worker_loop())
+            self._worker = asyncio.create_task(self._worker_loop(), context=telemetry.detached_context())
 
     async def _load_control(self) -> Dict[str, Any]:
         """

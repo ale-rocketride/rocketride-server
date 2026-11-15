@@ -23,7 +23,7 @@
 
 from .IGlobal import IGlobal
 from ai.common.llm_base import LLMBase
-from rocketlib import AVI_ACTION, warning
+from rocketlib import AVI_ACTION, warning, error
 from ai.common.schema import Doc
 from ai.common.avi.descriptor import rename_ext
 
@@ -82,7 +82,7 @@ class IInstance(LLMBase):
                     self._cache_from_image = True
                     self.instance.writeText(self._cached_answer)
                 except Exception as e:
-                    warning(f'OpenAI Vision: inference failed on image lane: {e}')
+                    error(f'OpenAI Vision: inference failed on image lane: {e}')
 
             self.image_data = None
             return self.preventDefault()
@@ -120,7 +120,7 @@ class IInstance(LLMBase):
                     answer = self.IGlobal._chat.chat(question)
                 except Exception as e:
                     chunk_id = doc.metadata.chunkId if doc.metadata else 'unknown'
-                    warning(f'OpenAI Vision: inference failed for chunk {chunk_id}: {e}')
+                    error(f'OpenAI Vision: inference failed for chunk {chunk_id}: {e}')
                     continue
 
                 answer_text = answer.getText()

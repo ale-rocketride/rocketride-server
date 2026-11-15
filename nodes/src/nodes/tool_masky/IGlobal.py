@@ -36,7 +36,7 @@ import math
 import urllib.parse
 from typing import Any, Dict, List
 
-from ai.common.config import Config, check_credential_resolved
+from ai.common.config import Config, check_credential_resolved, require_config
 from ai.common.utils import parse_bool
 from rocketlib import IGlobalBase, OPEN_MODE, warning
 
@@ -196,7 +196,7 @@ class IGlobal(IGlobalBase):
             warning(
                 f'Masky API key is required. Set it on the node or in {ENV_API_KEY}. Get one at https://masky.ai/developer'
             )
-            raise ValueError('Masky API key not configured')
+            require_config(False, 'Masky API key not configured')
         # A ${ROCKETRIDE_...} placeholder with no saved value must not reach Masky as the key.
         check_credential_resolved(self.glb.logicalType, 'apikey', api_key, self.glb.connConfig)
 

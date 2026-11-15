@@ -23,8 +23,16 @@
 
 #pragma once
 
+#include <cstdio>
+#include <random>
+
 namespace engine::store {
 namespace py = pybind11;
+
+// Pass trace ids for EaaS's telemetry: EaaS passes --otel_pass_ids to a run's
+// process only while telemetry is on. Without it the debugger is as before
+// (no id, no lock, the events unchanged).
+static application::Opt OtelPassIds{"--otel_pass_ids"};
 
 // Static member definitions
 std::mutex Debugger::s_registryMutex;
@@ -49,14 +57,28 @@ std::unordered_map<std::string, ServiceEndpointWeak>
  */
 void Debugger::debugEnter(IServiceFilterInstance *pInstance,
                           const json::Value &trace) noexcept {
-    m_recurseLevel++;  // Track depth of recursive calls
+    const bool monitored = ::engine::config::monitor()->isAppMonitor();
 
-    if (::engine::config::monitor()->isAppMonitor()) {
-        // Format it
+    // Track depth of recursive calls. With pass ids on, the outermost enter
+    // begins a pass with a trace id of its own; the level and the id change
+    // together, under the lock (other threads enter and leave on this pipe).
+    // The option and the monitor are fixed for the process, so an enter and
+    // its leave (or debugUnwind) always take the same branch.
+    std::string traceId;
+    if (OtelPassIds && monitored) {
+        std::lock_guard<std::mutex> guard(m_passLock);
+        if (m_recurseLevel++ == 0) m_passTraceId = newPassTraceId();
+        traceId = m_passTraceId;
+    } else {
+        m_recurseLevel++;
+    }
+
+    if (monitored) {
+        // Format it, with the pass's trace id ("tid") when there is one
         StackText msg;
         _tsbo(msg, {Format::HEX, {}, '*'}, "ENTER", pInstance->pipeId,
-              pInstance->endpoint->getPipeCount(),
-              pInstance->pipeType.id, trace.stringify());
+              pInstance->endpoint->getPipeCount(), pInstance->pipeType.id,
+              withPassTraceId(trace.stringify(), traceId));
 
         ::engine::config::monitor()->other("DBG", msg);
     }
@@ -71,17 +93,46 @@ void Debugger::debugEnter(IServiceFilterInstance *pInstance,
  */
 void Debugger::debugLeave(IServiceFilterInstance *pInstance,
                           const json::Value &trace) noexcept {
-    m_recurseLevel--;
+    const bool monitored = ::engine::config::monitor()->isAppMonitor();
 
-    if (::engine::config::monitor()->isAppMonitor()) {
-        // Format it
+    // The leave carries its pass's id; the outermost one ends the pass
+    std::string traceId;
+    if (OtelPassIds && monitored) {
+        std::lock_guard<std::mutex> guard(m_passLock);
+        traceId = m_passTraceId;
+        endLevelLocked();
+    } else {
+        m_recurseLevel--;
+    }
+
+    if (monitored) {
+        // Format it, with the pass's trace id ("tid") when there is one
         StackText msg;
         _tsbo(msg, {Format::HEX, {}, '*'}, "LEAVE", pInstance->pipeId,
-              pInstance->endpoint->getPipeCount(),
-              pInstance->pipeType.id, trace.stringify());
+              pInstance->endpoint->getPipeCount(), pInstance->pipeType.id,
+              withPassTraceId(trace.stringify(), traceId));
 
         ::engine::config::monitor()->other("DBG", msg);
     }
+}
+
+/**
+ * @brief Ends the level a debugEnter began whose debugLeave will not come
+ * (an exception unwound the call between them; see PassScope).
+ *
+ * No event, as before; but the pass ends when its outermost level does, so
+ * the next pass gets a trace id of its own instead of keeping this one.
+ */
+void Debugger::debugUnwind() noexcept {
+    if (!OtelPassIds || !::engine::config::monitor()->isAppMonitor()) return;
+    std::lock_guard<std::mutex> guard(m_passLock);
+    endLevelLocked();
+}
+
+/// One level less (never below zero); at zero the pass is over and a call
+/// made before the next one has no pass id. Under m_passLock.
+void Debugger::endLevelLocked() noexcept {
+    if (m_recurseLevel > 0 && --m_recurseLevel == 0) m_passTraceId.clear();
 }
 
 /**
@@ -118,6 +169,47 @@ void Debugger::debugError(IServiceFilterInstance *pFrom,
                           Error &ccode) noexcept {
     LOG(DebugOut, ">DBG*ERROR*....");
     // Could log ccode and methodName for more detail if needed.
+}
+
+/// The current pass's trace id (see debugger.hpp)
+std::string Debugger::passTraceId() const noexcept {
+    std::lock_guard<std::mutex> guard(m_passLock);
+    return m_passTraceId;
+}
+
+/// The serialized trace object with the pass's "tid" as its first member,
+/// inserted into the serialized text (no second serialization of the trace,
+/// which at FULL holds the object's data)
+std::string Debugger::withPassTraceId(std::string trace,
+                                      const std::string &traceId) {
+    if (traceId.empty()) return trace;
+    std::string member = "\"tid\":\"" + traceId + "\"";
+    // No trace (trace level none): a null value, serialized "null"
+    if (trace.empty() || trace == "null") return "{" + member + "}";
+    if (trace.front() != '{') return trace;
+    bool empty = trace.find_first_not_of(" \t\r\n", 1) == trace.size() - 1;
+    trace.insert(1, empty ? member : member + ",");
+    return trace;
+}
+
+/// A new W3C trace id: 128 random bits as 32 lowercase hex chars (never all
+/// zero). Not cryptographic (mt19937_64): an identifier, never a secret. Each
+/// thread's generator is seeded with 256 bits: run processes and threads
+/// across a fleet must not share a seed, or they would repeat each other's ids.
+std::string Debugger::newPassTraceId() noexcept {
+    thread_local std::mt19937_64 random = [] {
+        std::random_device device;
+        std::seed_seq seed{device(), device(), device(), device(),
+                           device(), device(), device(), device()};
+        return std::mt19937_64(seed);
+    }();
+    uint64_t high = random(), low = random();
+    if (!high && !low) low = 1;
+    char text[33];
+    std::snprintf(text, sizeof(text), "%016llx%016llx",
+                  static_cast<unsigned long long>(high),
+                  static_cast<unsigned long long>(low));
+    return text;
 }
 
 // ------------------ Task Control Methods ------------------

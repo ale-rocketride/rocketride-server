@@ -25,9 +25,11 @@
 OpenAI binding for the ChatLLM.
 """
 
+import os
 from typing import Any, Dict
+
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, require_config
 from langchain_openai import ChatOpenAI
 from openai import OpenAI, APIError, AuthenticationError, RateLimitError, APIConnectionError
 
@@ -70,6 +72,14 @@ class Chat(ChatBase):
         # Get the api key, don't save it
         apikey = config.get('apikey')
         self._apikey = apikey
+
+        # No key at all is the pipeline's to fix: refuse it as configuration, not
+        # as a start failure. The library falls back to OPENAI_API_KEY, so only
+        # when that is unset too.
+        require_config(
+            apikey or os.environ.get('OPENAI_API_KEY'),
+            f'{provider}: no API key is configured. Set "apikey" on the node, or a variable for it.',
+        )
 
         # Reasoning models stream via the Responses API + max_completion_tokens.
         if self._is_reasoning:

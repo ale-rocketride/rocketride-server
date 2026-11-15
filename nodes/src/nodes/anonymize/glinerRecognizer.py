@@ -26,7 +26,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict
 
-from rocketlib import debug, expand
+from rocketlib import debug, expand, error
 from ai.common.config import Config
 from ai.common.models import GLiNER
 from ai.common.models.base import make_device_lock
@@ -178,7 +178,7 @@ class GliNERRecognizer:
                         chunk_results.append(res)
 
                 except Exception as e:
-                    debug(f'Anonymize: GLiNER Error on chunk {chunk_idx} with labels {label_batch}: {str(e)}')
+                    error(f'Anonymize: GLiNER detection failed on chunk {chunk_idx} with labels {label_batch}: {str(e)}')
 
             return chunk_results
 
@@ -193,7 +193,7 @@ class GliNERRecognizer:
                 except Exception as e:
                     # Per-batch failures are already handled inside process_chunk,
                     # so this only catches a failure in the surrounding scaffolding.
-                    debug(f'Anonymize: Error processing chunk: {str(e)}')
+                    error(f'Anonymize: GLiNER detection failed on a chunk: {str(e)}')
 
                 completed += 1
                 if completed % 5 == 0 or completed == total_chunks:

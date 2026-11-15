@@ -36,6 +36,33 @@ from ai.common.utils import flatten_content_blocks
 # A lock keeps concurrent appends race-free with the reader's slice.
 _USAGE_LOCK = threading.Lock()
 _TURN_CALLS: ContextVar[Optional[list]] = ContextVar('llm_turn_calls', default=None)
+# The usage of the one logical model call being made (ChatBase.chat_string): its span's
+# gen_ai.usage.* and the response model. Same thread rules as _TURN_CALLS.
+_CALL_USAGE: ContextVar[Optional[dict]] = ContextVar('llm_call_usage', default=None)
+
+
+def begin_call_usage():
+    """Start collecting one model call's usage; returns the token end_call_usage takes."""
+    return _CALL_USAGE.set({})
+
+
+def end_call_usage(token) -> dict:
+    """The usage collected since begin_call_usage (input, output, cache_read tokens; model)."""
+    with _USAGE_LOCK:
+        usage = dict(_CALL_USAGE.get() or {})
+    _CALL_USAGE.reset(token)
+    return usage
+
+
+def _add_call_usage(input_tokens: int, output_tokens: int, cache_read: int, model: str) -> None:
+    usage = _CALL_USAGE.get()
+    if usage is None:
+        return
+    with _USAGE_LOCK:
+        for key, value in (('input', input_tokens), ('output', output_tokens), ('cache_read', cache_read)):
+            usage[key] = usage.get(key, 0) + value
+        if model:
+            usage['model'] = model
 
 
 def _record_usage(call: dict) -> None:
@@ -365,6 +392,8 @@ def report_llm_tokens(
         # per-call metrics.event — that fed an unbounded events list re-serialized in
         # full after every object (multi-MB metric lines on long-lived chat tasks).
         _record_usage({'input': it, 'output': ot, 'cache_read': cr, 'cache_creation': cc, 'model': model})
+        # gen_ai.usage.input_tokens counts all input, cached included (GenAI conventions)
+        _add_call_usage(it + cr + cc, ot, cr, str(model or ''))
     except Exception as exc:
         # Best-effort accounting: keep the chat turn alive, but leave an operational trace.
         debug_usage_failure(exc)

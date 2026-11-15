@@ -31,7 +31,7 @@ for agent invocation.
 
 from __future__ import annotations
 
-from ai.common.config import Config
+from ai.common.config import Config, require_config
 from rocketlib import IGlobalBase, OPEN_MODE, warning
 
 from ai.common.utils import parse_bool
@@ -53,7 +53,7 @@ class IGlobal(IGlobalBase):
         api_key = str(cfg.get('apikey') or '').strip()
         if not api_key:
             warning('Bland AI API key is required. Get one at https://www.bland.ai')
-            raise ValueError('Bland AI API key not configured')
+            require_config(False, 'Bland AI API key not configured')
 
         server_name = str(cfg.get('serverName') or 'bland').strip()
         default_voice = str(cfg.get('voice') or 'June').strip()

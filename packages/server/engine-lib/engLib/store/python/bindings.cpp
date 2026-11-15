@@ -983,6 +983,12 @@ PYBIND11_EMBEDDED_MODULE(engLib, engLib) {
                               next, pDown.get())
         .PYBIND_PROP_READONLY(IServiceFilterInstance, const IPipeType &,
                               pipeType, pipeType)
+        // The trace id of the pass this call belongs to (Debugger::passTraceId)
+        .PYBIND_PROP_READONLY_CUSTOM(
+            passTraceId, [](IServiceFilterInstance &obj) -> std::string {
+                return obj.pipe ? obj.pipe->debugger.passTraceId()
+                                : std::string();
+            })
 
         .PYBIND_PROP_READONLY_CUSTOM(
             pipe,

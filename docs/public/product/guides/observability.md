@@ -85,9 +85,10 @@ SDKs) rather than returning partial silence.
 | In VS Code | The Status page, Flow and Trace tabs, and the component debugger | [VS Code usage](/clients/vscode/usage) |
 | Building your own ingester / dashboards | Raw `rrext_monitor` subscriptions over the WebSocket protocol | [WebSocket Events](/connect/websocket/observability) |
 
-What RocketRide observability is **not**: there is no OpenTelemetry,
-Prometheus, or webhook emitter — the wire protocol is the integration point
-if you need one.
+The server can also export metrics and traces with OpenTelemetry (off by
+default): see [Telemetry (OpenTelemetry)](/operate/self-hosting/telemetry).
+There is no Prometheus scrape endpoint or webhook emitter — an OpenTelemetry
+Collector or the wire protocol is the integration point if you need one.
 
 ## Two workflows
 

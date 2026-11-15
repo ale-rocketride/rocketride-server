@@ -33,6 +33,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from ai.modules.task import error_log
 from rocketride import TASK_STATE
 
 from ai.constants import CONST_STATUS_HISTORY_LIMIT
@@ -2335,6 +2337,8 @@ def _exit_task(exit_event_seen=False):
     t._stop_requested = False
     t._crash = None
     t._process_killed = False
+    t._exit_signal = None
+    t._oom_kills_at_start = None
     return t
 
 
@@ -2454,6 +2458,11 @@ def _ending_task(process_exit_code):
     t._send_status_update = AsyncMock()
     t._forward_task_event = AsyncMock()
     t._process_exit_code = AsyncMock(return_value=process_exit_code)
+    # what _terminated() reads for the run's telemetry and error log
+    t._reached_running = True
+    t._stop_interrupted = False
+    t._exit_error_code = None
+    t._error_log = error_log.Disabled()
     return t
 
 

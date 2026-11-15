@@ -51,6 +51,7 @@ export class DAPBase {
 	protected _callDebugMessage?: (message: string) => void;
 	protected _callDebugProtocol?: (message: string) => void;
 	protected _logger?: unknown; // User-provided logger instance
+	protected _traceparent?: () => string | undefined; // W3C trace context provider (config.traceparent)
 
 	/**
 	 * Creates a new DAPBase instance.
@@ -66,6 +67,7 @@ export class DAPBase {
 		this._msgType = module;
 		this._callDebugMessage = config.onDebugMessage;
 		this._callDebugProtocol = config.onProtocolMessage;
+		this._traceparent = config.traceparent;
 
 		if (transport) this._bindTransport(transport);
 	}
@@ -179,6 +181,19 @@ export class DAPBase {
 			return [false, null];
 		} catch (error) {
 			return [true, this.buildException(message, error as Error)];
+		}
+	}
+
+	/**
+	 * The caller's W3C traceparent, from config.traceparent; never throws.
+	 */
+	protected _currentTraceparent(): string | undefined {
+		if (!this._traceparent) return undefined;
+		try {
+			const value = this._traceparent();
+			return typeof value === 'string' && /^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/.test(value) ? value : undefined;
+		} catch {
+			return undefined;
 		}
 	}
 
@@ -298,6 +313,10 @@ export class DAPBase {
 			seq: this._nextSeq(),
 			command,
 		};
+		const traceparent = this._currentTraceparent();
+		if (traceparent) {
+			request.traceparent = traceparent;
+		}
 
 		if (options.token !== undefined) {
 			if (!options.arguments) {
