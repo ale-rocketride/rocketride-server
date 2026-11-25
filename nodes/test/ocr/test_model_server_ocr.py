@@ -407,7 +407,7 @@ class _RaisingOcr:
 def test_content_swallows_but_reports(adapter, monkeypatch) -> None:
     """A page failure must not propagate, and must not vanish either."""
     captured: list[str] = []
-    monkeypatch.setattr(_iglobal_mod, 'warning', lambda msg: captured.append(msg))
+    monkeypatch.setattr(_iglobal_mod, 'error', lambda msg: captured.append(msg))
     adapter._ocr = _RaisingOcr()
 
     assert adapter.content(_StubDocument()) == []
@@ -420,7 +420,7 @@ def test_content_swallows_but_reports(adapter, monkeypatch) -> None:
 def test_text_only_result_is_not_broken_by_the_diagnostic(adapter, monkeypatch) -> None:
     """boxes=None is a valid text-only result; the box-count diagnostic must not raise."""
     captured: list[str] = []
-    monkeypatch.setattr(_iglobal_mod, 'warning', lambda msg: captured.append(msg))
+    monkeypatch.setattr(_iglobal_mod, 'error', lambda msg: captured.append(msg))
     adapter._ocr = _StubOcr({'text': 'hello', 'boxes': None})
 
     pages = adapter.content(_StubDocument())
