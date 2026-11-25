@@ -159,6 +159,19 @@ def test_a_url_keeps_its_scheme_and_host():
     assert redact('POST https://api.openai.com/v1/chat/completions?x=1 503') == 'POST https://api.openai.com 503'
 
 
+def test_a_url_keeps_its_port():
+    from ai.common.logfmt import redact
+
+    # Tools read the bound port from Uvicorn's startup line (the builder's test server, --port=0)
+    line = 'Uvicorn running on http://127.0.0.1:38289 (Press CTRL+C to quit)'
+    assert redact(line) == line
+    assert redact('https://user:hunter22@db.example.com:5432/prod?sslmode=require') == 'https://db.example.com:5432'
+    assert redact('Uvicorn running on http://[::1]:8080 (Press CTRL+C to quit)').endswith(
+        'http://[::1]:8080 (Press CTRL+C to quit)'
+    )
+    assert redact('GET http://[::1]:8080/bot123:secret/x?key=y') == 'GET http://[::1]:8080'
+
+
 def test_ordinary_error_text_is_kept():
     from ai.common.logfmt import redact
 

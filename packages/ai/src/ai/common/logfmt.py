@@ -56,13 +56,16 @@ _SECRETS = [
         ),
         '[REDACTED]',
     ),
-    # A URL keeps its scheme and host only: a path or query can carry a token
-    # (api.telegram.org/bot<token>/..., ?key=...), and user:password@ is dropped
+    # A URL keeps its scheme, host and port only: a path or query can carry a token
+    # (api.telegram.org/bot<token>/..., ?key=...), and user:password@ is dropped.
+    # The port stays: it is not a secret, and tools read it from lines such as
+    # Uvicorn's 'running on http://127.0.0.1:<port>' (or http://[::1]:<port>).
     (
         re.compile(
-            r'\b([a-z][a-z0-9+.-]{0,31})://(?:[^@/\s]{0,256}@)?([^/:?#\s\'"]{1,253})(?::\d+)?[^\s\'"<>]*', re.IGNORECASE
+            r'\b([a-z][a-z0-9+.-]{0,31})://(?:[^@/\s]{0,256}@)?(\[[0-9a-f:.]{2,45}\]|[^/:?#\s\'"]{1,253})(:\d{1,5})?[^\s\'"<>]*',
+            re.IGNORECASE,
         ),
-        r'\1://\2',
+        r'\1://\2\3',
     ),
     (re.compile(r'(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}'), r'\1 [REDACTED]'),
     # JSON web tokens, Google API keys, GitHub, Hugging Face and Pinecone tokens

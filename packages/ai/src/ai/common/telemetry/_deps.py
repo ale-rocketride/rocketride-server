@@ -981,7 +981,9 @@ def _port(url: Any) -> Optional[int]:
 # ── What leaves the process ──────────────────────────────────────────────────
 
 
-_URL = re.compile(r'\b([a-z][a-z0-9+.-]*)://(?:[^@/\s]*@)?([^/:?#\s\'"]+)(?::\d+)?[^\s\'"]*', re.IGNORECASE)
+_URL = re.compile(
+    r'\b([a-z][a-z0-9+.-]*)://(?:[^@/\s]*@)?(\[[0-9a-f:.]{2,45}\]|[^/:?#\s\'"]+)(:\d{1,5})?[^\s\'"]*', re.IGNORECASE
+)
 
 
 def _scheme(url: Any) -> Optional[str]:
@@ -1048,9 +1050,9 @@ def call_name(method: Any, template: Optional[str]) -> Optional[str]:
 
 def _clean_text(text: Any, redact: Callable[[str], str]) -> str:
     """An error text without SQL statement or parameters (SQLAlchemy appends both), URLs cut to
-    scheme://host (a path can carry a token: api.telegram.org/bot<token>/...), redacted.
+    scheme://host[:port] (a path can carry a token: api.telegram.org/bot<token>/...), redacted.
     """
-    return redact(_URL.sub(r'\1://\2', _SQL_DETAIL.sub('', str(text))))
+    return redact(_URL.sub(r'\1://\2\3', _SQL_DETAIL.sub('', str(text))))
 
 
 # The attributes a dependency span keeps (current and older semantic-convention names)
