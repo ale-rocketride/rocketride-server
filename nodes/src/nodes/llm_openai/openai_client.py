@@ -30,6 +30,12 @@ from typing import Any, Dict
 
 from ai.common.chat import ChatBase
 from ai.common.config import Config, require_config
+from ai.common.model_gateway import (
+    close_http_clients,
+    hosted_http_clients,
+    hosted_output_tokens,
+    resolve_openai_credentials,
+)
 from langchain_openai import ChatOpenAI
 from openai import OpenAI, APIError, AuthenticationError, RateLimitError, APIConnectionError
 
@@ -56,6 +62,7 @@ class Chat(ChatBase):
     SUPPORTS_REASONING_STREAMING = True
     SUPPORTS_NATIVE_TOOLS = True
     _responses_llm = None
+    _http_clients: Dict[str, Any] = {}
 
     _llm: ChatOpenAI
 
@@ -69,9 +76,24 @@ class Chat(ChatBase):
         # Get the nodes configuration
         config = Config.getNodeConfig(provider, connConfig)
 
-        # Get the api key, don't save it
-        apikey = config.get('apikey')
+        # The node's own key, or on a hosted engine with no key, the run's hosted
+        # models pass. Every client below gets the same key and base URL. On the
+        # pass, the clients keep to the run's limits, and the SDK sends a call
+        # once: the backend charges each request it takes.
+        credentials = resolve_openai_credentials(provider, config.get('apikey'))
+        apikey = credentials.apikey
         self._apikey = apikey
+        self._hosted_models = credentials.hosted
+        self._client_kwargs = {'api_key': apikey}
+        if credentials.base_url:
+            self._client_kwargs['base_url'] = credentials.base_url
+        if credentials.hosted:
+            self._modelOutputTokens = hosted_output_tokens(provider, self._modelOutputTokens, credentials.gateway)
+            if self._modelOutputTokens == credentials.gateway.max_output_tokens:
+                # At the pass's limit: a higher node limit would change nothing
+                self._hosted_output_cap = self._modelOutputTokens
+            self._http_clients = hosted_http_clients(credentials.gateway)
+            self._client_kwargs['max_retries'] = 0
 
         # No key at all is the pipeline's to fix: refuse it as configuration, not
         # as a start failure. The library falls back to OPENAI_API_KEY, so only
@@ -84,17 +106,19 @@ class Chat(ChatBase):
         # Reasoning models stream via the Responses API + max_completion_tokens.
         if self._is_reasoning:
             # Raw client for the Responses API path (reasoning models).
-            self._raw_client = OpenAI(api_key=apikey)
+            self._raw_client = OpenAI(**self._client_kwargs, http_client=self._http_clients.get('http_client'))
             self._llm = ChatOpenAI(
                 model=self._model,
-                api_key=apikey,
+                **self._client_kwargs,
+                **self._http_clients,
                 model_kwargs={'max_completion_tokens': self._modelOutputTokens},
             )
         else:
             self._raw_client = None
             self._llm = ChatOpenAI(
                 model=self._model,
-                api_key=apikey,
+                **self._client_kwargs,
+                **self._http_clients,
                 temperature=config['temperature'] if 'temperature' in config else 0,
                 max_tokens=self._modelOutputTokens,
             )
@@ -110,7 +134,8 @@ class Chat(ChatBase):
         if self._responses_llm is None:
             self._responses_llm = _ResponsesChatOpenAI(
                 model=self._model,
-                api_key=self._apikey,
+                **self._client_kwargs,
+                **self._http_clients,
                 use_responses_api=True,
                 max_tokens=self._modelOutputTokens,
                 reasoning={'summary': 'auto'},
@@ -118,6 +143,13 @@ class Chat(ChatBase):
                 store=False,
             )
         return self._responses_llm
+
+    def close(self) -> None:
+        """
+        Close the HTTP clients built for the hosted models pass.
+        """
+        close_http_clients(self._http_clients)
+        self._http_clients = {}
 
     def is_retryable_error(self, error):
         """
