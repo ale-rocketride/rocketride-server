@@ -888,9 +888,16 @@ class TaskConn(
             account = self._account_info if self._authenticated else None
             args = message.get('arguments') or {}
             token = args.get('token') or message.get('token')
-            if account is not None and (account.auth or '').startswith('tk_'):
-                token = account.auth
-            control = self._server._task_control.get(token) if isinstance(token, str) and token else None
+            auth = (account.auth or '') if account is not None else ''
+            if auth.startswith('pk_'):
+                try:
+                    control = self._server.get_task_control_by_public_key(auth)
+                except Exception:  # no live run for the key: the request names none
+                    control = None
+            else:
+                if auth.startswith('tk_'):
+                    token = auth
+                control = self._server._task_control.get(token) if isinstance(token, str) and token else None
             if control is not None and control.id:
                 identity['task_id'] = control.id
             return identity

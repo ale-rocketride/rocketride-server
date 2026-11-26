@@ -392,6 +392,7 @@ class _Invocation:
         'tid_rejected',
         'last_mono',
         'stall_logged',
+        'stall_noted',
         'marks',
         'models',
         'raised',
@@ -405,6 +406,8 @@ class _Invocation:
         self.tid_rejected = False  # the engine's pass id was not trusted (counted once for the pass)
         self.last_mono = time.monotonic()  # the pass's last enter or leave: its progress
         self.stall_logged = False  # its 'pass stalled' error line was written
+        # A stall line named this pass's trace at some point: kept (never cleared by progress)
+        self.stall_noted = False
         # (component id, wall start, monotonic start)
         self.stack: List[Tuple[str, float, float]] = []
         # (type, wall start, wall end, result, component id)
@@ -412,13 +415,13 @@ class _Invocation:
         # Up to two ids of components that left, kept past the span cap (_carried)
         self.left: List[str] = []
         # A node's own report that its call failed (relay.node_error):
-        # (component type, wall time, error type, message)
-        self.marks: List[Tuple[str, float, str, str]] = []
+        # (component type, wall time, error type, message, component id)
+        self.marks: List[Tuple[str, float, str, str, str]] = []
         # Logical model calls a node made (relay.model_call): (component type, start ns,
         # end ns, gen_ai attributes, error type, provider message, retries)
         self.models: List[Tuple[Any, ...]] = []
         # Exceptions its nodes' handlers raised (relay._raised), shared with the run's
-        # record: [component type, class, message, location, monotonic, engine code, wall]
+        # record: [component type, class, message, location, monotonic, engine code, wall, component id]
         self.raised: List[List[Any]] = []
         # Dependency calls the subprocess relayed (relay.py): (component type, name, start ns, end ns,
         # attributes, error type, span id: the one its traceparent carried, 0 if none)
@@ -1235,32 +1238,17 @@ class Telemetry:
             context=_exemplar(run.trace_id, run.span_id, bool(reason)),
         )
         if reason:
-            with _preset_ids(run.trace_id, run.span_id):
-                span = self._tracer.start_span(
-                    'task',
-                    kind=SpanKind.INTERNAL,
-                    start_time=_ns(run.begin_wall),
-                    attributes=self._with_span_org(
-                        {
-                            'rocketride.task.id': task_id,
-                            'rocketride.task.run_kind': run_kind,
-                            'rocketride.task.outcome': outcome,
-                            'rocketride.task.stop_reason': stop,
-                            'rocketride.sampling.reason': reason,
-                            **({'rocketride.project.id': run.project} if run.project else {}),
-                        },
-                        org_id,
-                    ),
-                    # its failed and slow passes, each a trace of its own
-                    links=[
-                        Link(
-                            SpanContext(tid, sid, is_remote=False, trace_flags=TraceFlags(TraceFlags.SAMPLED)),
-                            {'rocketride.sampling.reason': why},
-                        )
-                        for tid, sid, why in run.pass_links
-                    ]
-                    or None,
-                )
+            span = self._start_task_span(
+                task_id,
+                run,
+                org_id,
+                {
+                    'rocketride.task.run_kind': run_kind,
+                    'rocketride.task.outcome': outcome,
+                    'rocketride.task.stop_reason': stop,
+                    'rocketride.sampling.reason': reason,
+                },
+            )
             if error_type:
                 span.set_attribute('error.type', error_type)
                 if error_code:
@@ -1307,6 +1295,32 @@ class Telemetry:
             sys.stdout.flush()
         except Exception:
             self.count_hook_error('run_ended_log')
+
+    def _start_task_span(self, task_id: str, run: '_Run', org_id: Any, attributes: Dict[str, Any]) -> Any:
+        """The run's 'task' span, with the ids it was given when it began and links to its kept passes."""
+        with _preset_ids(run.trace_id, run.span_id):
+            return self._tracer.start_span(
+                'task',
+                kind=SpanKind.INTERNAL,
+                start_time=_ns(run.begin_wall),
+                attributes=self._with_span_org(
+                    {
+                        'rocketride.task.id': task_id,
+                        **attributes,
+                        **({'rocketride.project.id': run.project} if run.project else {}),
+                    },
+                    org_id,
+                ),
+                # its failed and slow passes, each a trace of its own
+                links=[
+                    Link(
+                        SpanContext(tid, sid, is_remote=False, trace_flags=TraceFlags(TraceFlags.SAMPLED)),
+                        {'rocketride.sampling.reason': why},
+                    )
+                    for tid, sid, why in run.pass_links
+                ]
+                or None,
+            )
 
     def error_log_trace(self, task_id: str) -> str:
         """The run's trace id for an error log line, and keep that trace (the log must lead to it)."""
@@ -1740,6 +1754,7 @@ class Telemetry:
                 time.monotonic(),
                 None,
                 int(body.get('w') or 0) / 1e9 or time.time(),
+                str(component),
             ]
             run.raised = raised
             invocation = run.invocations.get(body.get('p'))
@@ -1766,7 +1781,7 @@ class Telemetry:
                 reason = ''
                 component_type = self._component_type(run, str(body['c']), pipeline)
                 wall = int(body.get('w') or 0) / 1e9 or time.time()
-                invocation.marks.append((component_type, wall, error_type, message))
+                invocation.marks.append((component_type, wall, error_type, message, str(body['c'])))
                 invocation.call_error = True  # the pass is kept, as for a failed call
         if reason:
             self.count_dropped(reason)
@@ -2084,7 +2099,7 @@ class Telemetry:
         stuck or unwound pass was closed.
         """
         if invocation.marks:
-            kinds = [kind for _, _, kind, _ in invocation.marks]
+            kinds = [mark[2] for mark in invocation.marks]
             causes = [TURN_CAUSES.get(kind, 'platform') for kind in kinds]
             cause = next(c for c in TURN_CAUSE_ORDER if c in causes)
             return 'error', cause, kinds[causes.index(cause)]
@@ -2193,6 +2208,8 @@ class Telemetry:
         dropped = ''
         if invocation.error:
             reason = 'error'
+        elif invocation.stall_noted:
+            reason = 'stalled'  # a stall error line named this trace: it must resolve
         elif self._slow and duration >= self._slow and self._slow_allowed(task_id, run.org):
             reason = 'slow'
         elif invocation.call_error and self._dependency_error_limit.allow(task_id, run.org):
@@ -2200,12 +2217,12 @@ class Telemetry:
             # 401 the node reported as a warning): kept, under a flood guard of
             # its own (a provider's outage must not spend the slow traces' budget)
             reason = 'dependency_error'
-        elif invocation.call_error and not self._keep_success():
-            reason, dropped = '', 'dependency_error_rate_limited'
-        elif self._keep_success():
+        elif self._keep_success():  # drawn once: the sample ratio applies once per pass
             reason = 'ratio'
         else:
             reason = ''
+            if invocation.call_error:
+                dropped = 'dependency_error_rate_limited'
         if dropped:
             self.count_dropped(dropped)
         # Queued first: only a trace that will be exported is named by an exemplar or a link
@@ -2233,7 +2250,7 @@ class Telemetry:
         if kept:
             if not run.keep_reason:
                 run.keep_reason = 'pass_kept'  # the pass links to the run's trace: keep it too
-            if reason in ('error', 'slow', 'dependency_error') and len(run.pass_links) < MAX_PASS_LINKS:
+            if reason in ('error', 'stalled', 'slow', 'dependency_error') and len(run.pass_links) < MAX_PASS_LINKS:
                 # the run's trace leads to its failed and slow passes (a pass already leads to its run)
                 run.pass_links.append((invocation.trace_id, invocation.span_id, reason))
         # Measured whatever the sampling; the exemplars name the pass's spans when they are kept
@@ -2338,7 +2355,7 @@ class Telemetry:
         elif invocation.marks:
             # A node reported its call failed and went on (an LLM answering with the
             # provider's error): the pass failed for that question
-            component_type, _, error_type, _ = invocation.marks[0]
+            component_type, _, error_type = invocation.marks[0][:3]
             root.set_status(Status(StatusCode.ERROR, f'{component_type}: {error_type}'))
             root.set_attribute('error.type', error_type)
             root.set_attribute('rocketride.component.type', component_type)
@@ -2369,7 +2386,10 @@ class Telemetry:
             for mark in [
                 m
                 for m in marks
-                if m[0] == component_type and start - MATCH_TOLERANCE <= m[1] <= finish + MATCH_TOLERANCE
+                # the same component, then the time: two adjacent nodes of one type stay apart
+                if m[0] == component_type
+                and m[4] == component_id
+                and start - MATCH_TOLERANCE <= m[1] <= finish + MATCH_TOLERANCE
             ]:
                 marks.remove(mark)
                 child.set_status(Status(StatusCode.ERROR, mark[2]))
@@ -2382,10 +2402,12 @@ class Telemetry:
             for error in [
                 r
                 for r in raised
-                if r[0] == component_type and start - MATCH_TOLERANCE <= r[6] <= finish + MATCH_TOLERANCE
+                if r[0] == component_type
+                and r[7] == component_id
+                and start - MATCH_TOLERANCE <= r[6] <= finish + MATCH_TOLERANCE
             ]:
                 raised.remove(error)
-                _component_type, cls, message, location, _mono, code, wall = error
+                _component_type, cls, message, location, _mono, code, wall, _component_id = error
                 child.set_status(Status(StatusCode.ERROR, f'{cls}: {message}'[:MAX_CAUSE_LENGTH]))
                 # error.type: the engine's code for it (bounded); exception.type: the class
                 child.set_attribute('error.type', code or cls)
@@ -2439,7 +2461,7 @@ class Telemetry:
                 if message:
                     model.add_event('exception', {'exception.message': message}, timestamp=end_ns)
             model.end(end_time=end_ns)
-            models.append([component_type, start_ns, end_ns, model, 0])
+            models.append([component_type, start_ns, end_ns, model, {}])
         tolerance = int(MATCH_TOLERANCE * 1e9)
         for component_type, name, start_ns, end_ns, call_attributes, error_type, span_id in sorted(
             invocation.calls, key=lambda c: c[2]
@@ -2453,11 +2475,16 @@ class Telemetry:
                 None,
             )
             if holder is not None:
-                # a try of a model call: the second and later are resends (HTTP conventions)
+                # a try of a model call: a later HTTP request with the same method, server
+                # and route as an earlier one under it is a resend (HTTP conventions)
                 parent = holder[3]
-                if holder[4]:
-                    call_attributes = dict(call_attributes, **{'http.request.resend_count': holder[4]})
-                holder[4] += 1
+                method = call_attributes.get('http.request.method')
+                if method:
+                    key = (method, call_attributes.get('server.address'), call_attributes.get('url.template'))
+                    tries = holder[4].get(key, 0)
+                    if tries:
+                        call_attributes = dict(call_attributes, **{'http.request.resend_count': tries})
+                    holder[4][key] = tries + 1
             else:
                 parent = _call_parent(spans, component_type, start_ns / 1e9, end_ns / 1e9)
             # A call that sent a traceparent (the model server) keeps the span id it sent:
@@ -2497,6 +2524,9 @@ class Telemetry:
                 oldest[method] = max(oldest.get(method, 0.0), age)
                 if self._overdue and age >= self._overdue and not logged:
                     entry[4] = True
+                    if request is not None:
+                        # before the lock is released: a request ending now keeps its trace
+                        request.error_logged = True
                     overdue.append((method, age, identity, request))
         for method, age, identity, request in overdue:
             self._overdue_line(method, age, identity, request)
@@ -2573,6 +2603,7 @@ class Telemetry:
                     passes.append((task_id, component_type, run.org, seconds))
                     if self._stall_log and seconds >= self._stall_log and not invocation.stall_logged:
                         invocation.stall_logged = True
+                        invocation.stall_noted = True
                         stalled.append((task_id, component_type, run.org, seconds, invocation.trace_id, run.project))
         # The org's cap takes the lock: outside it
         idle: Dict[Tuple[str, str], float] = {}
@@ -2641,12 +2672,39 @@ class Telemetry:
         for task_id, run in runs:
             for invocation in list(run.invocations.values()):
                 self._emit_invocation(task_id, invocation, run, end=now, unclosed=True, why='shutdown')
+            # The run's own trace, still open: its kept passes link to it
+            reason = run.keep_reason or ('ratio' if self._keep_success() else '')
+            if run.begin_mono is not None and run.trace_id and reason:
+                try:
+                    span = self._start_task_span(
+                        task_id,
+                        run,
+                        run.org,
+                        {
+                            'rocketride.task.run_kind': run.run_kind or 'dev',
+                            'rocketride.sampling.reason': reason,
+                            'rocketride.task.closed_by': 'shutdown',
+                        },
+                    )
+                    span.end(end_time=_ns(max(now, run.begin_wall)))
+                except Exception:
+                    self.count_hook_error('task_span_shutdown')
         # The queued traces get a quarter of the time; the rest is dropped
         self.flush_traces(timeout / 4)
         try:
             self._traces.put_nowait(None)
         except queue.Full:
-            pass
+            # still full: make room for the stop signal, or the worker would wait forever
+            try:
+                self._traces.get_nowait()
+                self._traces.task_done()
+                self.count_dropped('trace_queue_full')
+            except queue.Empty:
+                pass
+            try:
+                self._traces.put_nowait(None)
+            except queue.Full:
+                pass
         half = max(1, int(timeout * 375))
         try:
             self._meter_provider.shutdown(timeout_millis=half)

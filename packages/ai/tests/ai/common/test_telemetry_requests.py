@@ -105,13 +105,15 @@ def test_requests_are_timed_and_traceparent_needs_a_signed_in_caller(monkeypatch
 
 def test_credential_headers_over_cleartext_are_refused():
     pytest.importorskip('opentelemetry.sdk')
+    from rocketride.otelbridge.config import InsecureTransportError
+
     from ai.common.telemetry._otel import _check_transport
 
     environ = {
         'OTEL_EXPORTER_OTLP_ENDPOINT': 'http://collector.example:4318',
         'OTEL_EXPORTER_OTLP_HEADERS': 'Authorization=Bearer secret',
     }
-    with pytest.raises(Exception):
+    with pytest.raises(InsecureTransportError, match='refusing to export OTLP credentials in cleartext'):
         _check_transport(environ)
     # loopback, TLS, or the explicit opt-out are fine; the display never shows a secret
     for override in (

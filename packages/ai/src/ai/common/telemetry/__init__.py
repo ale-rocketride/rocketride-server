@@ -63,7 +63,7 @@ Configuration (environment, or the engine's .env):
                                     RR_OTEL_SLOW_RUN_SECONDS, RR_OTEL_SLOW_REQUEST_SECONDS and
                                     RR_OTEL_SLOW_TRACES_PER_MINUTE: see the docs)
     RR_OTEL_INSTRUMENT              dependency calls traced and measured (EaaS's and, relayed,
-                                    the nodes'): 'db,redis,http,aws,model' (default), 'none'
+                                    the nodes'): 'db,redis,http,aws,grpc,model' (default), 'none'
     RR_OTEL_COMPONENT_SPANS         component spans per pipeline trace (default 200, at most 1000)
     RR_OTEL_ORG_ATTRIBUTE           'true' puts the customer org id on metrics (default off:
                                     up to RR_OTEL_ORG_CARDINALITY orgs times each metric's
@@ -104,6 +104,7 @@ import contextlib
 import importlib
 import importlib.util
 import logging
+import math
 import os
 import threading
 import time
@@ -245,6 +246,13 @@ def _start(service_version: str) -> None:
         return
     for instrument in declared:
         instrument._bind(impl)
+    with _state_lock:
+        closed = _closed
+    if closed:
+        # shutdown ran while binding: it may have cleared the instruments first
+        for instrument in declared:
+            instrument._instrument = None
+        return
     if connections is not None:
         impl.guard('observe_connections', impl.observe_connections, connections)
     debug(f'OpenTelemetry on, exporting to {impl.endpoint_display}')
@@ -301,6 +309,8 @@ def shutdown() -> None:
     try:
         timeout = float(os.environ.get('RR_OTEL_SHUTDOWN_TIMEOUT', '3'))
     except ValueError:
+        timeout = 3.0
+    if not math.isfinite(timeout) or timeout < 0:
         timeout = 3.0
     worker = threading.Thread(target=impl.shutdown, args=(timeout,), name='otel-shutdown', daemon=True)
     worker.start()
@@ -624,7 +634,7 @@ class Counter(_Instrument):
 
     kind = 'counter'
 
-    def add(self, value: int = 1, **attributes: Any) -> None:
+    def add(self, value: int = 1, /, **attributes: Any) -> None:
         """Add to the count (no-op unless telemetry is on; never raises)."""
         instrument = self._instrument
         if instrument is None:
@@ -640,7 +650,7 @@ class Histogram(_Instrument):
 
     kind = 'histogram'
 
-    def record(self, value: float, **attributes: Any) -> None:
+    def record(self, value: float, /, **attributes: Any) -> None:
         """Record one value (no-op unless telemetry is on; never raises)."""
         instrument = self._instrument
         if instrument is None:
@@ -841,6 +851,7 @@ class _RateLimit(logging.Filter):
             self._last[key] = now
             if len(self._last) > 500:
                 self._last.clear()
+                self._suppressed.clear()
         if suppressed:
             record.msg = f'{record.msg} ({suppressed} similar messages suppressed in the last minute)'
         return True

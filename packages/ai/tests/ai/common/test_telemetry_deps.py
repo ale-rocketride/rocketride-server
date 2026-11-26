@@ -457,8 +457,11 @@ def test_real_httpx_instrumentation_joins_the_request(sink):
     try:
         handled('rrext_items', call, 'Unavailable')
     finally:
-        HTTPXClientInstrumentor().uninstrument()
-        server.shutdown()
+        try:
+            HTTPXClientInstrumentor().uninstrument()
+        finally:
+            server.shutdown()
+            server.server_close()
     by_kind = {span.kind: span for span in exported(telemetry, spans)}
     client = by_kind[SpanKind.CLIENT]
     assert client.parent.span_id == by_kind[SpanKind.SERVER].context.span_id
@@ -500,6 +503,35 @@ def test_stamps_of_spans_that_never_end_expire(sink, monkeypatch):
     monkeypatch.setattr(_deps, 'UNDECIDED_SECONDS', 0.0)
     http_call(telemetry)  # any span ending sweeps
     assert telemetry._spans._owner == {}
+
+
+def test_a_failed_call_whose_request_stamp_expired_is_exported_marked(sink, monkeypatch):
+    telemetry, spans, _ = sink
+    tracer = telemetry._tracer_provider.get_tracer(HTTP_SCOPE)
+    with telemetry_module.request_scope('rrext_stream'):
+        late = tracer.start_span('GET', kind=SpanKind.CLIENT, attributes={'http.request.method': 'GET'})
+    monkeypatch.setattr(_deps, 'UNDECIDED_SECONDS', 0.0)
+    http_call(telemetry)  # sweeps: the stamp of the open call expires
+    late.set_status(Status(StatusCode.ERROR))
+    late.end()
+    marked = [s for s in exported(telemetry, spans) if s.attributes.get('rocketride.dependency.owner_expired') is True]
+    assert [s.context.span_id for s in marked] == [late.get_span_context().span_id]
+    # a call that started outside any request is not marked
+    assert not any(
+        s.attributes.get('rocketride.dependency.owner_expired')
+        for s in exported(telemetry, spans)
+        if s.context.span_id != late.get_span_context().span_id
+    )
+    assert telemetry._spans._orphans == {}
+
+
+def test_own_spans_are_not_tracked_as_open_client_calls(sink):
+    telemetry, _, _ = sink
+    own = telemetry._tracer_provider.get_tracer('rocketride.eaas')
+    before = len(_deps._OPEN_CLIENTS)
+    span = own.start_span('model call', kind=SpanKind.CLIENT)
+    assert len(_deps._OPEN_CLIENTS) == before  # its end never calls client_ended
+    span.end()
 
 
 def test_a_failed_connect_lasts_as_long_as_the_attempt():
@@ -812,6 +844,39 @@ def test_the_connection_says_who_made_a_request_never_the_token():
     assert identity['client'] == 'user'
     assert 'secret-token' not in identity.values()
     assert TaskConn.request_identity(SimpleNamespace(), {}) == {}  # never raises
+
+
+def test_a_public_key_request_names_the_run_its_key_is_bound_to():
+    from types import SimpleNamespace
+
+    from ai.modules.task.task_conn import TaskConn
+
+    bound = SimpleNamespace(id='tok.a')
+    account = SimpleNamespace(auth='pk_a', userId='u1', organization={'id': 'org-a'})
+    conn = SimpleNamespace(
+        connection_state=(account, 'org-a', False),
+        _signed_in_org='org-a',
+        _connection_id=7,
+        _account_info=account,
+        _authenticated=True,
+        _server=SimpleNamespace(
+            _task_control={'token-b': SimpleNamespace(id='tok.b')},
+            get_task_control_by_public_key=lambda key: bound,
+        ),
+    )
+    # no token, or another run's token: still the run the key is bound to
+    assert TaskConn.request_identity(conn, {})['task_id'] == 'tok.a'
+    assert TaskConn.request_identity(conn, {'arguments': {'token': 'token-b'}})['task_id'] == 'tok.a'
+
+
+def test_an_overdue_request_is_marked_kept_before_the_lock_is_released(sink, monkeypatch):
+    telemetry, _spans, _reader = sink
+    telemetry._overdue = 0.01
+    request, _context = telemetry.request_scope('rrext_execute', None, {'org_id': 'org-a'})
+    time.sleep(0.02)
+    monkeypatch.setattr(telemetry, '_overdue_line', lambda *args: None)  # the line is written later
+    telemetry._observe_oldest(None)
+    assert request.error_logged  # a request ending before the line keeps its trace
 
 
 def test_a_request_that_never_finishes_shows_in_the_gauges_and_writes_one_line(sink, capsys):

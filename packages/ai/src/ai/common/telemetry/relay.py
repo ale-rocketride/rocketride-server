@@ -431,7 +431,7 @@ def emit(call: Any, scope: Optional[_Scope] = None) -> None:
     streamed response read on another thread or after the handler returned).
     """
     global _overflow
-    scope = _current() or scope
+    scope = scope if scope is not None else _current()
     record = {
         'm': call.metric,
         'n': call.name,

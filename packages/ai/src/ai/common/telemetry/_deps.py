@@ -53,6 +53,7 @@ import time
 import weakref
 from collections import OrderedDict
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 from opentelemetry.sdk.trace import Event, ReadableSpan, SpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
@@ -671,7 +672,7 @@ def install() -> None:
 
 
 def parse_flags(value: Optional[str]) -> Tuple[List[str], List[str]]:
-    """RR_OTEL_INSTRUMENT ('db,redis,http,aws' when unset; 'none' or '' for none) → (flags, unknown names)."""
+    """RR_OTEL_INSTRUMENT ('db,redis,http,aws,grpc,model' when unset; 'none' or '' for none) → (flags, unknown names)."""
     if value is None:
         return list(FLAGS), []
     names = [name.strip().lower() for name in value.replace(' ', ',').split(',') if name.strip()]
@@ -968,19 +969,32 @@ def _error_type(span: ReadableSpan, attributes: Dict[str, Any]) -> Optional[str]
     return '_OTHER'
 
 
+def _split(url: Any) -> Any:
+    """The URL's parts when it has a scheme and a host (an IPv6 address in brackets too), else None."""
+    try:
+        parts = urlsplit(str(url or ''))
+        return parts if parts.scheme and parts.hostname else None
+    except ValueError:
+        return None
+
+
 def _host(url: Any) -> Optional[str]:
-    match = re.match(r'^[a-z][a-z0-9+.-]*://(?:[^@/]*@)?([^/:?#]+)', str(url or ''), re.IGNORECASE)
-    return match.group(1) if match else None
+    parts = _split(url)
+    return parts.hostname if parts is not None else None
 
 
 def _port(url: Any) -> Optional[int]:
     """The URL's port, or its scheme's default (http 80, https 443)."""
-    match = re.match(r'^([a-z][a-z0-9+.-]*)://(?:[^@/]*@)?[^/:?#]+(?::(\d+))?', str(url or ''), re.IGNORECASE)
-    if not match:
+    parts = _split(url)
+    if parts is None:
         return None
-    if match.group(2):
-        return int(match.group(2))
-    return {'http': 80, 'https': 443, 'ws': 80, 'wss': 443}.get(match.group(1).lower())
+    try:
+        port = parts.port
+    except ValueError:  # a port that is not a number or out of range
+        return None
+    if port is not None:
+        return port
+    return {'http': 80, 'https': 443, 'ws': 80, 'wss': 443}.get(parts.scheme.lower())
 
 
 # ── What leaves the process ──────────────────────────────────────────────────
@@ -1024,9 +1038,17 @@ _ROUTES = tuple(
         (r'/(chat|embed|generate)', r'/\1'),
     )
 )
-# A path prefix kept in the template: at most 3 short segments of letters (a
-# version such as v1 or v1beta), never an id or a token
-_SAFE_SEGMENT = re.compile(r'^(?:v\d+(?:beta|alpha)?\d*|[a-z][a-z-]{1,15})$')
+# A path prefix kept in the template (at most 3 segments): an API version (v1,
+# v1beta, v2...) or one of these fixed words. Any other segment, a name a
+# customer chose for a proxy or a tenant, an id or a token, is '{prefix}'.
+_VERSION_SEGMENT = re.compile(r'^v\d+(?:beta|alpha)?\d*$')
+_PREFIX_WORDS = frozenset(
+    ('api', 'openai', 'inference', 'llm', 'ai', 'compatible-mode', 'compatibility', 'serving-endpoints')
+)
+
+
+def _prefix_segment(segment: str) -> str:
+    return segment if _VERSION_SEGMENT.match(segment) or segment in _PREFIX_WORDS else '{prefix}'
 
 
 def url_template(url: Any) -> Optional[str]:
@@ -1040,9 +1062,9 @@ def url_template(url: Any) -> Optional[str]:
         if found is None:
             continue
         segments = [segment for segment in path[: found.start()].split('/') if segment]
-        if len(segments) > 3 or not all(_SAFE_SEGMENT.match(segment) for segment in segments):
+        if len(segments) > 3:
             return '_OTHER'
-        return ''.join(f'/{segment}' for segment in segments) + found.expand(template)
+        return ''.join(f'/{_prefix_segment(segment)}' for segment in segments) + found.expand(template)
     return '_OTHER'
 
 
@@ -1111,7 +1133,7 @@ SPAN_ATTRIBUTES = frozenset(
 )
 
 
-def sanitized(span: ReadableSpan, redact: Callable[[str], str]) -> ReadableSpan:
+def sanitized(span: ReadableSpan, redact: Callable[[str], str], extra: Optional[Dict[str, Any]] = None) -> ReadableSpan:
     """
     A copy of a dependency span with only the attributes known to be safe
     (SPAN_ATTRIBUTES: where the call went and how it ended), never a statement,
@@ -1129,6 +1151,8 @@ def sanitized(span: ReadableSpan, redact: Callable[[str], str]) -> ReadableSpan:
         attributes['url.template'] = template
     if url and not attributes.get('server.port') and _port(url):
         attributes['server.port'] = _port(url)
+    if extra:
+        attributes.update(extra)
     events = []
     for event in span.events:
         values = dict(event.attributes or {})
@@ -1194,15 +1218,28 @@ class DependencyBuffer(SpanProcessor):
         self._held = 0
         # request span id → (kept, decided at (monotonic))
         self._decided: 'OrderedDict[int, Tuple[bool, float]]' = OrderedDict()
+        # span ids that started under a request whose stamp was lost (expired or
+        # past the cap): exported on their own, marked as such
+        self._orphans: 'OrderedDict[int, None]' = OrderedDict()
 
     def on_start(self, span: Any, parent_context: Any = None) -> None:
-        client_started(span)
-        request = current_request()  # on_start runs in the caller's context
-        if request is not None and getattr(span.instrumentation_scope, 'name', '') != self._own_scope:
-            with self._lock:
-                if len(self._owner) < MAX_HELD * 2:
-                    self._owner[span.context.span_id] = (request.span_id, time.monotonic())
+        if getattr(span.instrumentation_scope, 'name', '') != self._own_scope:
+            # our own spans are passed through on end without client_ended()
+            client_started(span)
+            request = current_request()  # on_start runs in the caller's context
+            if request is not None:
+                with self._lock:
+                    if len(self._owner) < MAX_HELD * 2:
+                        self._owner[span.context.span_id] = (request.span_id, time.monotonic())
+                    else:
+                        self._orphan(span.context.span_id)
         self._delegate.on_start(span, parent_context=parent_context)
+
+    def _orphan(self, span_id: int) -> None:
+        """Remember a span whose owner stamp is gone (under the lock); bounded."""
+        self._orphans[span_id] = None
+        if len(self._orphans) > MAX_HELD:
+            self._orphans.popitem(last=False)
 
     def on_end(self, span: ReadableSpan) -> None:
         if (span.instrumentation_scope.name if span.instrumentation_scope else '') == self._own_scope:
@@ -1221,6 +1258,9 @@ class DependencyBuffer(SpanProcessor):
             expired = self._expire(now)
             owned = self._owner.pop(span.context.span_id, None)
             owner = owned[0] if owned is not None else None
+            orphan = owner is None and span.context.span_id in self._orphans
+            if orphan:
+                del self._orphans[span.context.span_id]
             if owner is not None:
                 decided = self._decided.get(owner)
                 if decided is not None:
@@ -1240,8 +1280,9 @@ class DependencyBuffer(SpanProcessor):
         if keep:
             self._release(span)
         if owner is None and self._keep_root(span):
-            # A call outside any request decides itself: kept when it failed or was slow
-            self._release(span)
+            # A call outside any request decides itself: kept when it failed or was slow.
+            # One whose request's stamp is gone says so: its request may have been dropped
+            self._release(span, {'rocketride.dependency.owner_expired': True} if orphan else None)
 
     def decide(self, request_id: int, keep: bool) -> None:
         """A request decided: release its held spans (kept) or drop them; later ones follow."""
@@ -1258,9 +1299,9 @@ class DependencyBuffer(SpanProcessor):
             for span in pending[1]:
                 self._release(span)
 
-    def _release(self, span: ReadableSpan) -> None:
+    def _release(self, span: ReadableSpan, extra: Optional[Dict[str, Any]] = None) -> None:
         try:
-            self._delegate.on_end(sanitized(span, self._redact))
+            self._delegate.on_end(sanitized(span, self._redact, extra))
         except Exception:
             self._count_dropped('dependency_span_error', 1)
 
@@ -1277,6 +1318,7 @@ class DependencyBuffer(SpanProcessor):
             if now - at < UNDECIDED_SECONDS:
                 break
             self._owner.popitem(last=False)
+            self._orphan(span_id)
         dropped = 0
         while self._pending:
             request_id, (first, spans) = next(iter(self._pending.items()))

@@ -169,8 +169,8 @@ A Prometheus-compatible backend shows `rocketride.task.ended` as
 pipeline call's `http.client.request.duration` carry exemplars: the trace and span
 of a measurement (the pass, the model call, the failed HTTP try). Only a kept trace
 is named (a pass the sampling dropped leaves no exemplar). A failed call's pass is
-kept under the `dependency_error` flood guard, so during a flood an exemplar can
-name a trace that was not kept. The backend must store exemplars (Mimir:
+kept under the `dependency_error` flood guard, so during a flood some of them are
+not kept, and those leave no exemplar. The backend must store exemplars (Mimir:
 `max_global_exemplars_per_user`).
 
 | Metric | Type | Attributes | What it measures |
@@ -222,10 +222,14 @@ time (OTLP start timestamps; in Mimir,
   for each dependency call that node made (an LLM provider's API, a database, the
   model server; see *Dependency calls*). It is exported when the pass ends, so a
   long-running deployment has live traces. The decision to keep it is made at that
-  point: failed passes and slow ones are always kept; so is a pass in which a
-  dependency call failed although the pass went on (`dependency_error`: a retried
-  429, a 401 the node answered with an error message), under the same flood
-  guard as slow ones; the rest at `RR_OTEL_TRACES_SAMPLE_RATIO`.
+  point: a pass in which a node failed (it raised, or returned an error) is always
+  kept; so is a pass named by a `rocketride.pass.stalled` error line; slow ones are
+  kept under a flood guard; so is a pass in which a dependency call failed
+  although the pass went on (`dependency_error`: a retried 429, a 401 the node
+  answered with an error message), under a flood guard of its own. A pass whose
+  node answered with an error message counts as a failed turn, but its trace is
+  kept under that `dependency_error` guard, so during a flood of such failures
+  some are not kept. The rest are kept at `RR_OTEL_TRACES_SAMPLE_RATIO`.
   The `pipeline` span carries the run (`rocketride.task.id`, and its
   `rocketride.pipeline.id` and `rocketride.source`), the pipeline's project
   (`rocketride.project.id`: opaque, the same for every run of that pipeline, also
@@ -242,9 +246,12 @@ time (OTLP start timestamps; in Mimir,
   message (secrets removed). Whichever way the node asked (streaming, native
   streaming, or not), it is one model call; a stream that broke after text
   reached the user is a failed call. Its HTTP tries are its children, named
-  `{method} {url.template}` (a known provider route, else `_OTHER`), with
+  `{method} {url.template}` (a known provider route, else `_OTHER`; a path prefix
+  keeps API versions such as `v1` and common words such as `api` or `openai`, any
+  other prefix segment is `{prefix}`), with
   `server.address`, `server.port`, `http.response.status_code`, and
-  `http.request.resend_count` on the second and later tries. When a node reports that its call failed
+  `http.request.resend_count` on a try that repeats an earlier one (same method,
+  server and route). When a node reports that its call failed
   although it went on (an LLM node answering with the provider's error), its
   component span and the `pipeline` span are marked failed with the bounded
   cause (`error.type`: `provider_auth`, `provider_rate_limited`,
@@ -264,7 +271,10 @@ time (OTLP start timestamps; in Mimir,
   (`code.file.path`, `code.line.number`). A run killed by a signal says which
   (`rocketride.task.exit_signal`, and `rocketride.task.oom_suspected`). The span
   links to the run's kept failed and slow passes (at most 32; each link's
-  `rocketride.sampling.reason`), each a `pipeline` trace of its own.
+  `rocketride.sampling.reason`), each a `pipeline` trace of its own. A run still
+  live when the server shuts down gets its `task` span then, with
+  `rocketride.task.closed_by` `shutdown` and no outcome, so its passes' links
+  resolve.
 - **`<method>`** (`rpc.method`, as the RPC conventions name it): a SERVER span
   for each WebSocket request, kept when it failed, took
   `RR_OTEL_SLOW_REQUEST_SECONDS` or more, or an ERROR log line named its trace.
@@ -282,7 +292,10 @@ time (OTLP start timestamps; in Mimir,
 The server's own calls to its database, Redis, HTTP services and AWS are traced
 and measured (`RR_OTEL_INSTRUMENT`). Each call is a CLIENT span under the request
 that made it, kept or dropped with that request; a call made outside any request
-(a background job) is kept when it failed or was slow. Every call is measured,
+(a background job) is kept when it failed or was slow. So is a call that ended
+after its request's decision was forgotten (a stream open for more than 10
+minutes): it carries `rocketride.dependency.owner_expired` `true`, as its request
+may not have been kept. Every call is measured,
 kept or not (`db.client.operation.duration`, `http.client.request.duration`,
 `rpc.client.call.duration`). No SQL statement or parameter, URL query or
 credential leaves the server, and error messages are redacted.

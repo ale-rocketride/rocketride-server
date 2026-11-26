@@ -1085,6 +1085,7 @@ def test_a_turn_names_the_llm_server_it_used(sink):
     telemetry.component_trace('tok.chat_1', 'leave', 3, 'my_llm', t + 0.6, {'result': 'continue'}, PIPELINE)
     telemetry.flush_measurements()
     points = _turn_points(reader)
+    assert len(points) == 2  # one ok series and one error series, nothing else
     by_outcome = {a['rocketride.turn.outcome']: (a, v) for a, v in points}
     assert by_outcome['ok'][0]['server.address'] == 'api.openai.com' and by_outcome['ok'][1] == 1
     failed, count = by_outcome['error']
@@ -1643,3 +1644,111 @@ def test_a_pass_whose_trace_could_not_be_queued_leaves_no_exemplar_and_no_link(s
     assert run.pass_links == [] and run.keep_reason == ''
     (turn,) = [p for p in _points_of(reader, 'rocketride.turn') if p.value]
     assert all(not e.trace_id for e in turn.exemplars)
+
+
+def test_a_call_keeps_the_scope_it_started_in(written):
+    # a streamed call started in component A and ended while B is handled
+    started_in = relay._Scope(1, 'comp_a', 0xA)
+    context = relay._context()
+    token = context.attach(context.set_value(relay._SCOPE_KEY, relay._Scope(2, 'comp_b', 0xB)))
+    try:
+        now = time.time_ns()
+        relay.emit(_deps.Call('http.client.request.duration', 'POST', now, now, {}, None), started_in)
+    finally:
+        context.detach(token)
+    relay.flush()
+    (record,) = records(written)
+    assert (record['p'], record['c'], record['t']) == (1, 'comp_a', f'{0xA:032x}')
+
+
+def test_a_mark_goes_to_its_own_component_when_two_of_one_type_are_adjacent(sink):
+    telemetry, spans, _ = sink
+    pipeline = {
+        'components': [
+            {'id': 'chat_1', 'provider': 'chat'},
+            {'id': 'llm_a', 'provider': 'llm_openai'},
+            {'id': 'llm_b', 'provider': 'llm_openai'},
+        ]
+    }
+    _begin(telemetry, 'tok.chat_1')
+    t = time.time()
+    telemetry.component_trace('tok.chat_1', 'enter', 3, 'chat_1', t, {}, pipeline)
+    telemetry.component_trace('tok.chat_1', 'enter', 3, 'llm_a', t + 0.01, {}, pipeline)
+    telemetry.component_trace('tok.chat_1', 'leave', 3, 'llm_a', t + 0.1, {'result': 'continue'}, pipeline)
+    telemetry.component_trace('tok.chat_1', 'enter', 3, 'llm_b', t + 0.11, {}, pipeline)
+    # within the tolerance of llm_a's end too: the component id decides
+    mark = {'k': 'err', 'x': 'provider_auth', 'g': 'denied', 'w': int((t + 0.12) * 1e9), 'p': 3, 'c': 'llm_b'}
+    telemetry.dependency_relayed('tok.chat_1', {'calls': [mark]}, pipeline)
+    telemetry.component_trace('tok.chat_1', 'leave', 3, 'llm_b', t + 0.3, {'result': 'continue'}, pipeline)
+    telemetry.component_trace('tok.chat_1', 'leave', 3, 'chat_1', t + 0.31, {'result': 'continue'}, pipeline)
+    assert telemetry.flush_traces(5)
+    telemetry._tracer_provider.force_flush()
+    llms = {
+        s.attributes['rocketride.component.id']: s
+        for s in spans.get_finished_spans()
+        if s.name == 'component llm_openai'
+    }
+    assert llms['llm_a'].status.status_code != StatusCode.ERROR
+    assert llms['llm_b'].status.status_code == StatusCode.ERROR
+    assert llms['llm_b'].attributes['error.type'] == 'provider_auth'
+
+
+def test_distinct_requests_under_one_model_call_are_not_resends(sink):
+    telemetry, spans, _ = sink
+    _begin(telemetry, 'tok.chat_1')
+    t = time.time()
+    upload = _call('POST /v1/files', t + 0.1, t + 0.15)
+    upload['a'] = dict(upload['a'], **{'url.template': '/v1/files'})
+    chat = _call('POST /v1/chat/completions', t + 0.2, t + 0.3)
+    chat['a'] = dict(chat['a'], **{'url.template': '/v1/chat/completions'})
+    lookup = dict(_call('GET', t + 0.31, t + 0.32), m='db.client.operation.duration', a={'db.system.name': 'redis'})
+    model = {
+        'k': 'gen',
+        's': int((t + 0.1) * 1e9),
+        'e': int((t + 0.4) * 1e9),
+        'p': 3,
+        'c': 'my_llm',
+        'a': {'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': 'openai', 'gen_ai.request.model': 'gpt-4o'},
+    }
+    telemetry.component_trace('tok.chat_1', 'enter', 3, 'my_llm', t, {}, PIPELINE)
+    telemetry.dependency_relayed('tok.chat_1', {'calls': [upload, chat, lookup, model]}, PIPELINE)
+    telemetry.component_trace('tok.chat_1', 'leave', 3, 'my_llm', t + 0.5, {}, PIPELINE)
+    assert telemetry.flush_traces(5)
+    telemetry._tracer_provider.force_flush()
+    tries = [s for s in spans.get_finished_spans() if s.kind == SpanKind.CLIENT and not s.name.startswith('chat ')]
+    assert len(tries) == 3
+    assert all('http.request.resend_count' not in s.attributes for s in tries)
+
+
+def test_a_recovered_failure_past_its_budget_draws_the_sample_ratio_once(sink, monkeypatch):
+    telemetry, spans, reader = sink
+    draws = []
+    monkeypatch.setattr(telemetry, '_keep_success', lambda: draws.append(1) or True)
+    monkeypatch.setattr(telemetry._dependency_error_limit, 'allow', lambda *a: False)
+    _begin(telemetry)
+    t = time.time()
+    telemetry.component_trace('task-1', 'enter', 1, 'my_llm', t, {}, PIPELINE)
+    telemetry.dependency_relayed(
+        'task-1', {'calls': [_call('POST', t + 0.01, t + 0.02, pipe=1, error='429')]}, PIPELINE
+    )
+    telemetry.component_trace('task-1', 'leave', 1, 'my_llm', t + 0.1, {}, PIPELINE)
+    assert draws == [1]
+    assert telemetry.flush_traces(5)
+    telemetry._tracer_provider.force_flush()
+    (root,) = [s for s in spans.get_finished_spans() if s.name == 'pipeline']
+    assert root.attributes['rocketride.sampling.reason'] == 'ratio'
+
+
+def test_a_run_live_at_shutdown_exports_its_task_span_for_its_passes_links():
+    spans = InMemorySpanExporter()
+    telemetry = Telemetry(span_exporter=spans, metric_reader=InMemoryMetricReader(), sample_ratio=0.0)
+    _begin(telemetry, 'tok.chat_1')
+    _pass(telemetry, 'tok.chat_1', marks=('provider_unavailable',), leave=False)  # a kept pass
+    telemetry.shutdown(1)
+    by_name = {}
+    for s in spans.get_finished_spans():
+        by_name.setdefault(s.name, []).append(s)
+    (task,), (pipeline,) = by_name['task'], by_name['pipeline']
+    assert task.attributes['rocketride.task.closed_by'] == 'shutdown'
+    assert 'rocketride.task.outcome' not in task.attributes
+    assert [link.context.trace_id for link in pipeline.links] == [task.context.trace_id]

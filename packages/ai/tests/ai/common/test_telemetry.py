@@ -58,12 +58,26 @@ def identity():
     return IDENTITY
 
 
+# Every Telemetry a test made: shut down after the test, whether its assertions passed or not
+_made = []
+
+
 def make(**kwargs):
     kwargs.setdefault('org_attribute', True)  # the per-customer metrics (off by default)
     spans = InMemorySpanExporter()
     reader = InMemoryMetricReader()
     telemetry = Telemetry(span_exporter=spans, metric_reader=reader, service_version='9.9.9', **kwargs)
+    _made.append(telemetry)
     return telemetry, spans, reader
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_made():
+    yield
+    while _made:
+        telemetry = _made.pop()
+        if not telemetry._measure_stop.is_set():  # the test did not shut it down itself
+            telemetry.shutdown(1)
 
 
 @pytest.fixture
@@ -469,13 +483,17 @@ def test_a_full_trace_queue_drops_and_counts(monkeypatch):
     release = threading.Event()
     original = telemetry._export_invocation
     monkeypatch.setattr(telemetry, '_export_invocation', lambda *a: (release.wait(5), original(*a)))
-    begin(telemetry)
-    for pipe in range(6):
-        call(telemetry, 'parse_1', pipe=pipe)  # never blocks the caller
-    release.set()
-    assert len([s for s in finished(telemetry, spans) if s.name == 'pipeline']) in (2, 3)
+    try:
+        begin(telemetry)
+        for pipe in range(6):
+            call(telemetry, 'parse_1', pipe=pipe)  # never blocks the caller
+    finally:
+        release.set()
+    exported = len([s for s in finished(telemetry, spans) if s.name == 'pipeline'])
+    assert exported in (2, 3)
     dropped = value(points(reader), 'rocketride.telemetry.dropped', rocketride__telemetry__reason='trace_queue_full')
     assert dropped.value in (3, 4)  # one may be in the thread's hands, not the queue
+    assert exported + dropped.value == 6  # every pass accounted for
     telemetry.shutdown(1)
 
 
@@ -499,7 +517,9 @@ def test_span_never_ends_before_it_starts(sink):
     telemetry, spans, _ = sink
     begin(telemetry)
     call(telemetry, 'parse_1', start=200.0, end=150.0)  # leave stamped earlier than enter
-    for span in finished(telemetry, spans):
+    got = finished(telemetry, spans)
+    assert {'pipeline', 'component parse'} <= {span.name for span in got}
+    for span in got:
         assert span.end_time >= span.start_time
 
 
@@ -1171,3 +1191,34 @@ def test_attributed_orgs_empty_when_the_org_id_is_off(monkeypatch):
     assert facade.attributed_orgs() == frozenset()
     assert telemetry.clean_info_attributes({'org': 'rocketride.org.id'}, {'org': 'org-0'}) is None
     telemetry.shutdown(1)
+
+
+def test_a_pass_named_by_a_stall_line_is_kept_after_it_resumes(capsys):
+    telemetry, spans, reader = make(stall_log_seconds=600, sample_ratio=0.0, slow_seconds=0)
+    begin(telemetry)
+    invocation = _open_call(telemetry, idle=700)
+    _idle(reader)  # writes the stall line
+    (line,) = [json.loads(x) for x in capsys.readouterr().out.splitlines() if 'rocketride.pass.stalled' in x]
+    telemetry.component_trace('task-1', 'leave', 0, 'my_secret_llm_name', 101.0, {}, PIPELINE)  # resumes, ends fine
+    assert not invocation.stall_logged and invocation.stall_noted
+    (pipeline,) = [s for s in finished(telemetry, spans) if s.name == 'pipeline']
+    assert f'{pipeline.context.trace_id:032x}' == line['trace_id']
+    assert pipeline.attributes['rocketride.sampling.reason'] == 'stalled'
+
+
+def test_a_full_trace_queue_does_not_keep_the_worker_from_stopping(monkeypatch):
+    monkeypatch.setattr(_otel, 'TRACE_QUEUE', 2)
+    telemetry, _, _ = make()
+    release = threading.Event()
+    original = telemetry._export_invocation
+    monkeypatch.setattr(telemetry, '_export_invocation', lambda *a: (release.wait(5), original(*a)))
+    try:
+        begin(telemetry)
+        for pipe in range(4):
+            call(telemetry, 'parse_1', pipe=pipe)
+        assert telemetry._traces.full()
+        telemetry.shutdown(0.05)  # the queue is still full when the stop signal goes in
+    finally:
+        release.set()
+    telemetry._trace_thread.join(5)
+    assert not telemetry._trace_thread.is_alive()

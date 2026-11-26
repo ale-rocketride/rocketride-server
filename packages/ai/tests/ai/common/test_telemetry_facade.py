@@ -142,22 +142,30 @@ def test_missing_sdk_installs_in_background_and_never_blocks(monkeypatch):
     monkeypatch.setenv('RR_OTEL_AUTO_INSTALL', 'true')
     monkeypatch.setattr(telemetry, '_sdk_installed', lambda: False)
     release = threading.Event()
-    started = []
+    entered = threading.Event()
+    returned = threading.Event()
+    finished = threading.Event()
 
     def slow_install(*_):
+        entered.set()
         release.wait(5)  # an index or lock that takes long
-        started.append(True)
+        finished.set()
+
+    def run_init():
+        telemetry.init('1.0')
+        returned.set()
 
     monkeypatch.setattr(telemetry, '_install_then_start', slow_install)
-    before = time.monotonic()
-    telemetry.init('1.0')
-    assert time.monotonic() - before < 0.5  # startup did not wait for the install
-    release.set()
-    for _ in range(50):
-        if started:
-            break
-        time.sleep(0.02)
-    assert started
+    caller = threading.Thread(target=run_init, daemon=True)
+    try:
+        caller.start()
+        assert entered.wait(5) and returned.wait(5)
+        # startup did not wait for the install
+        assert not finished.is_set()
+    finally:
+        release.set()
+        caller.join(5)
+    assert finished.wait(5)
 
 
 def test_failed_install_leaves_it_off(monkeypatch):
@@ -169,6 +177,8 @@ def test_failed_install_leaves_it_off(monkeypatch):
 
     fake_depends.load_depends = load_depends
     monkeypatch.setitem(sys.modules, 'depends', fake_depends)
+    with telemetry._state_lock:
+        telemetry._starting = True  # as init() leaves it for the installer
     telemetry._install_then_start('1.0')
     assert telemetry._impl is None and not telemetry._starting
 
@@ -232,12 +242,23 @@ def test_timed_records_and_reraises():
 def test_shutdown_is_bounded(monkeypatch):
     monkeypatch.setenv('RR_OTEL_SHUTDOWN_TIMEOUT', '0.3')
     impl = FakeImpl()
-    impl.shutdown = lambda timeout: time.sleep(10)  # collector unreachable
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked(timeout):  # collector unreachable
+        entered.set()
+        release.wait(10)
+
+    impl.shutdown = blocked
     telemetry._impl = impl
-    before = time.monotonic()
-    telemetry.shutdown()
-    assert time.monotonic() - before < 1.0
-    telemetry.shutdown()  # twice is safe
+    try:
+        before = time.monotonic()
+        telemetry.shutdown()
+        assert time.monotonic() - before < 1.0
+        assert entered.is_set() and not release.is_set()  # cleanup started and is still blocked
+        telemetry.shutdown()  # twice is safe
+    finally:
+        release.set()
 
 
 def test_hooks_after_shutdown_are_noops():
@@ -352,3 +373,61 @@ def test_init_after_shutdown_stays_off(monkeypatch):
     telemetry.shutdown()
     telemetry.init('1.0')
     assert telemetry._impl is None and not telemetry._starting
+
+
+@pytest.mark.parametrize('value', ['inf', 'nan', '-1'])
+def test_an_unbounded_shutdown_timeout_takes_the_default(monkeypatch, value):
+    monkeypatch.setenv('RR_OTEL_SHUTDOWN_TIMEOUT', value)
+    impl = FakeImpl()
+    telemetry._impl = impl
+    telemetry.shutdown()  # must not raise
+    assert ('shutdown', 3.0) in impl.calls
+
+
+def test_shutdown_while_binding_leaves_the_metrics_unbound(monkeypatch):
+    monkeypatch.setenv('RR_OTEL_ENABLED', 'true')
+    histogram = telemetry.Histogram('rocketride.test.bindrace', 's', 'test')
+    instrumented = []
+
+    class Impl(FakeImpl):
+        def make_instrument(self, *args):
+            # shutdown runs after _start published the implementation, before binding ended
+            if not instrumented:
+                instrumented.append('shutdown')
+                telemetry.shutdown()
+            return super().make_instrument(*args)
+
+        def instrument_dependencies(self):
+            instrumented.append('deps')
+            return [], []
+
+    fake = type(sys)('fake_otel')
+    fake.Telemetry = type('T', (), {'from_environment': staticmethod(lambda version: Impl())})
+    monkeypatch.setitem(sys.modules, 'ai.common.telemetry._otel', fake)
+    telemetry._start('1.0')
+    assert telemetry._impl is None
+    assert histogram._instrument is None
+    assert 'deps' not in instrumented
+
+
+def test_value_is_never_taken_from_the_attributes():
+    impl = FakeImpl()
+    histogram = telemetry.Histogram('rocketride.test.value', 's', 'test', attributes={'value': 'v'})
+    histogram._bind(impl)
+    with pytest.raises(KeyError):
+        with telemetry.timed(histogram) as attrs:
+            attrs['value'] = 'x'
+            raise KeyError('body')  # the body's own exception propagates
+    counter = telemetry.Counter('rocketride.test.cvalue', '{x}', 'test', attributes={'value': 'v'})
+    counter._bind(impl)
+    counter.add(2, value='y')
+    assert ('add', 'rocketride.test.cvalue', 2, {'v': 'y'}) in impl.calls
+
+
+def test_rate_limit_eviction_forgets_suppressed_counts():
+    limiter = telemetry._RateLimit(interval=60)
+    for i in range(502):
+        message = f'message {i}'
+        for _ in range(2):
+            limiter.filter(logging.LogRecord('opentelemetry', logging.WARNING, '', 0, message, None, None))
+    assert len(limiter._suppressed) <= len(limiter._last) + 1
