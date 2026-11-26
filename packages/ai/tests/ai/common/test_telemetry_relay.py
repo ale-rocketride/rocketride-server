@@ -255,6 +255,82 @@ def test_relayed_calls_outside_a_pass_are_measured_and_counted(sink):
     assert sum(counts) == 3  # every call is measured, placed or not
 
 
+def test_a_relayed_dropped_count_is_bounded(sink):
+    telemetry, _, reader = sink
+    batch = [
+        {'dropped': 10**12, 'reason': 'relay_overflow'},
+        {'dropped': -5, 'reason': 'relay_overflow'},
+        {'dropped': True, 'reason': 'relay_overflow'},
+        {'dropped': '7', 'reason': 'relay_overflow'},
+    ]
+    telemetry.dependency_relayed('task-1', {'calls': batch}, PIPELINE)
+    from ai.common.telemetry import _otel
+
+    assert _dropped(reader)['relay_overflow'] == _otel.MAX_RELAYED_DROPPED
+
+
+def _mark(when, **changes):
+    record = {'k': 'err', 'x': 'provider_auth', 'g': 'refused', 'w': int(when * 1e9), 'p': 3, 'c': 'my_llm'}
+    record.update(changes)
+    return {key: value for key, value in record.items() if value is not None}
+
+
+@pytest.mark.parametrize(
+    'changes',
+    [
+        {'extra': 'x'},  # a key the relay never writes
+        {'w': None},  # a key it always writes, missing
+        {'p': '3'},  # a pipe that is not a number
+        {'x': {'nested': 1}},  # a type that is not text
+        {'k': 'gen'},  # another kind's keys
+        {'k': 'exc'},
+        {'k': 'other'},
+    ],
+)
+def test_a_relayed_record_not_shaped_like_the_relays_is_ignored(sink, changes):
+    telemetry, spans, _ = sink
+    _begin(telemetry)
+    t = time.time()
+    telemetry.component_trace('task-1', 'enter', 3, 'my_llm', t, {}, PIPELINE)
+    telemetry.dependency_relayed('task-1', {'calls': [_mark(t + 0.1, **changes)]}, PIPELINE)
+    telemetry.component_trace('task-1', 'leave', 3, 'my_llm', t + 0.5, {}, PIPELINE)
+    assert telemetry.flush_traces(5)
+    telemetry._tracer_provider.force_flush()
+    (llm,) = [s for s in spans.get_finished_spans() if s.name == 'component llm_openai'] or [None]
+    assert llm is None or llm.status.status_code != StatusCode.ERROR
+
+
+def test_a_relayed_record_shaped_like_the_relays_is_taken(sink):
+    telemetry, spans, _ = sink
+    _begin(telemetry)
+    t = time.time()
+    telemetry.component_trace('task-1', 'enter', 3, 'my_llm', t, {}, PIPELINE)
+    telemetry.dependency_relayed('task-1', {'calls': [_mark(t + 0.1)]}, PIPELINE)
+    telemetry.component_trace('task-1', 'leave', 3, 'my_llm', t + 0.5, {}, PIPELINE)
+    assert telemetry.flush_traces(5)
+    telemetry._tracer_provider.force_flush()
+    (llm,) = [s for s in spans.get_finished_spans() if s.name == 'component llm_openai']
+    assert llm.status.status_code == StatusCode.ERROR
+
+
+def test_one_relayed_record_that_cannot_be_read_does_not_cost_the_batch(sink):
+    telemetry, _, reader = sink
+    _begin(telemetry)
+    t = time.time()
+    batch = [
+        dict(_call('POST', t, t + 0.1), s='not a number'),  # raises when read
+        _call('POST', t, t + 0.1),
+        {'dropped': 2, 'reason': 'relay_overflow'},
+    ]
+    telemetry.dependency_relayed('task-1', {'calls': batch}, PIPELINE)
+    assert _dropped(reader)['relay_overflow'] == 2
+    telemetry.flush_measurements()
+    (measured,) = _points_of(reader, 'http.client.request.duration')
+    assert measured.count == 1
+    (errors,) = [p for p in _points_of(reader, 'rocketride.telemetry.hook_errors') if p.value]
+    assert dict(errors.attributes)['rocketride.telemetry.hook'] == 'relay_record' and errors.value == 1
+
+
 def test_relayed_attributes_are_only_the_known_ones(sink):
     telemetry, spans, _ = sink
     _begin(telemetry)
@@ -885,6 +961,7 @@ def test_a_pass_open_at_a_restart_is_abandoned_and_its_model_calls_count(sink):
                     'p': 3,
                     'c': 'my_llm',
                     'a': {'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': 'openai'},
+                    'r': [],
                 }
             ]
         },
@@ -1379,7 +1456,9 @@ def test_a_stale_raise_does_not_name_a_later_engine_error(sink, monkeypatch):
     _begin(telemetry, 'tok.chat_1')
     telemetry.component_trace('tok.chat_1', 'enter', 3, 'my_llm', time.time(), {}, PIPELINE)
     telemetry.dependency_relayed(
-        'tok.chat_1', {'calls': [{'k': 'exc', 'x': 'KeyError', 'g': '', 'l': '', 'p': 3, 'c': 'my_llm'}]}, PIPELINE
+        'tok.chat_1',
+        {'calls': [{'k': 'exc', 'x': 'KeyError', 'g': '', 'l': '', 'w': time.time_ns(), 'p': 3, 'c': 'my_llm'}]},
+        PIPELINE,
     )
     monkeypatch.setattr(_otel, 'RAISED_MATCH_SECONDS', -1.0)
     telemetry.task_event(

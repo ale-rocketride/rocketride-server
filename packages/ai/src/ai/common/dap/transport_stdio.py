@@ -855,8 +855,8 @@ class TransportStdio(TransportBase):
                     }
                 )
 
-        # Parse channel signals: '>CHN*state' or '>CHN*state*connection_id'
-        # Dependency calls a node made, relayed for telemetry: '>SPN*[json, ...]' (ai.common.telemetry.relay)
+        # Dependency calls a node made, relayed for telemetry: '>SPN*[json, ...]' (ai.common.telemetry.relay);
+        # the Task keeps them only from a run it started with the relay on
         elif message.startswith('>SPN*'):
             try:
                 calls = json.loads(message[5:])
@@ -865,6 +865,7 @@ class TransportStdio(TransportBase):
             if isinstance(calls, list):
                 await self._transport_receive({'type': 'event', 'event': 'apaevt_dependency', 'body': {'calls': calls}})
 
+        # Parse channel signals: '>CHN*state' or '>CHN*state*connection_id'
         elif message.startswith('>CHN*'):
             parts = message.split('*')
             await self._transport_receive(

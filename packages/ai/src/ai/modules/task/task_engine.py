@@ -804,6 +804,9 @@ class Task(DAPBase):
         # The run's errors on the server's own output, with its trace id
         # (error_log: only when telemetry or RR_LOG_FORMAT is on)
         self._error_log = error_log.for_task(id, lambda: self.org_id or '', lambda: self.project_id or '')
+        # Whether this run's process was started with telemetry's relay (--otel_relay):
+        # only then are its relayed dependency records (>SPN*) taken
+        self._otel_relay = False
         # Bumped by every stop_task, so a restart can tell whether a stop arrived
         # while it loaded, even on a task whose last run was already stopped
         self._stop_count = 0
@@ -2634,7 +2637,8 @@ class Task(DAPBase):
         # A node's dependency calls are for telemetry only: not forwarded, and not
         # activity (neither the idle timer nor the stalled-start check moves for them)
         if event_type == 'apaevt_dependency':
-            telemetry.dependency_relayed(self.id, body, self._pipeline)
+            if self._otel_relay:
+                telemetry.dependency_relayed(self.id, body, self._pipeline)
             return
 
         # Update event timing
@@ -3318,6 +3322,7 @@ class Task(DAPBase):
             # Telemetry's pass ids and relay in the run's process (only while it is on),
             # ahead of the pipeline's own: the task reads the first --otel_relay
             child_args: List[str] = list(telemetry.child_arguments())
+            self._otel_relay = any(arg.startswith('--otel_relay=') for arg in child_args)
             for arg in _user_args():
                 option = arg.split('=', 1)[0].lower()
                 # Crash dumps are the operator's call, so a pipeline's own --dumps is

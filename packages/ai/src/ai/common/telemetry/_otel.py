@@ -191,6 +191,17 @@ _RELAY_ATTRIBUTES = frozenset(
 )
 # The attributes a relayed model call may carry (relay.model_call)
 _GENAI_ATTRIBUTES = frozenset(('gen_ai.operation.name', 'gen_ai.provider.name', 'gen_ai.request.model'))
+# The relay's other records (relay.node_error, _raised, model_call), by kind: the keys
+# and value types it writes, required then optional; a record with any other is ignored
+_RELAY_RECORDS: Dict[str, Tuple[Dict[str, type], Dict[str, type]]] = {
+    'err': ({'k': str, 'x': str, 'g': str, 'w': int, 'p': int, 'c': str}, {'t': str}),
+    'exc': ({'k': str, 'x': str, 'g': str, 'l': str, 'w': int, 'p': int, 'c': str}, {'t': str}),
+    'gen': (
+        {'k': str, 's': int, 'e': int, 'p': int, 'c': str, 'a': dict, 'r': list},
+        {'x': str, 'g': str, 'u': dict, 'rm': str, 't': str},
+    ),
+}
+MAX_RELAYED_DROPPED = 10000  # calls one relay record may say were dropped (relay.MAX_PENDING is far below)
 # A model call's usage (relay.model_call) as GenAI span attributes
 _GENAI_USAGE = {
     'input': 'gen_ai.usage.input_tokens',
@@ -339,6 +350,23 @@ class _SlowLimiter:
                     bucket[0] -= 1
                 return True
         return False
+
+
+def _relay_record_valid(record: Mapping[str, Any]) -> bool:
+    """Whether a relay record of a known kind has exactly the keys and value types the relay writes."""
+    shape = _RELAY_RECORDS.get(record.get('k'))  # type: ignore[arg-type]
+    if shape is None:
+        return False
+    required, optional = shape
+    if not required.keys() <= record.keys():
+        return False
+    for key, value in record.items():
+        expected = required.get(key) or optional.get(key)
+        if expected is None or not isinstance(value, expected):
+            return False
+        if expected is int and isinstance(value, bool):
+            return False
+    return True
 
 
 def _new_ids(rng: random.Random) -> Tuple[int, int]:
@@ -1562,21 +1590,29 @@ class Telemetry:
         records = body.get('calls') if isinstance(body, dict) else body
         for record in records if isinstance(records, list) else []:
             if isinstance(record, dict):
-                self._relayed(task_id, record, pipeline)
+                # One record that cannot be read costs that record only, not the batch
+                try:
+                    self._relayed(task_id, record, pipeline)
+                except Exception:
+                    self.count_hook_error('relay_record')
 
     def _relayed(self, task_id: str, body: Mapping[str, Any], pipeline: Optional[Dict[str, Any]]) -> None:
-        if body.get('dropped'):
-            reason = body.get('reason') if body.get('reason') in ('relay_overflow',) else 'dependency_span_cap'
-            self.count_dropped(reason, int(body['dropped']))
+        if 'dropped' in body:
+            dropped = body['dropped']
+            if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0:
+                reason = body.get('reason') if body.get('reason') in ('relay_overflow',) else 'dependency_span_cap'
+                self.count_dropped(reason, min(dropped, MAX_RELAYED_DROPPED))
             return
-        if body.get('k') == 'err':
-            self._node_error_mark(task_id, body, pipeline)
-            return
-        if body.get('k') == 'gen':
-            self._model_call(task_id, body, pipeline)
-            return
-        if body.get('k') == 'exc':
-            self._node_raised(task_id, body, pipeline)
+        kind = body.get('k')
+        if kind is not None:
+            if not _relay_record_valid(body):
+                return
+            if kind == 'err':
+                self._node_error_mark(task_id, body, pipeline)
+            elif kind == 'gen':
+                self._model_call(task_id, body, pipeline)
+            else:
+                self._node_raised(task_id, body, pipeline)
             return
         metric, start, end = body.get('m'), int(body.get('s') or 0), int(body.get('e') or 0)
         # Only the attributes the relay writes, short: a node could write a line itself

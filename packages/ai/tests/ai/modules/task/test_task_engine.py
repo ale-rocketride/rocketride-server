@@ -2923,3 +2923,20 @@ async def test_data_request_before_the_launch_fails_at_once(monkeypatch):
         await Task._send_data(t, {'command': 'apaext_process', 'arguments': {}})
 
     transport.assert_not_called()
+
+
+@pytest.mark.parametrize('relay', [False, True])
+async def test_relayed_dependency_records_are_taken_only_from_a_run_started_with_the_relay(monkeypatch, relay):
+    """A run's process started without --otel_relay has no relay: >SPN* lines from it are not telemetry."""
+    from ai.modules.task import task_engine
+
+    relayed = MagicMock(name='dependency_relayed')
+    monkeypatch.setattr(task_engine.telemetry, 'dependency_relayed', relayed)
+    t = _task()
+    t._error_log = MagicMock()
+    t._otel_relay = relay
+    body = {'calls': [{'m': 'db.client.operation.duration', 's': 1, 'e': 2}]}
+
+    await Task.on_event(t, {'event': 'apaevt_dependency', 'body': body})
+
+    assert relayed.call_count == (1 if relay else 0)
