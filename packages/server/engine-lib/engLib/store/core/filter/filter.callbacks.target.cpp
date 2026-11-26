@@ -117,28 +117,31 @@ void IServiceFilterInstance::cb_control(std::string &classType,
                         control.attr("model_dump")());
             }
 
-            this->pipe->debugger.debugEnter(filter.get(), enterTrace);
-            Debugger::PassScope passScope(this->pipe->debugger);
+            // The level ends (LEAVE sent) at the end of this block
+            {
+                Debugger::Level level(this->pipe->debugger, filter.get(),
+                                      enterTrace);
 
-            ccode = filter->control(control);
+                ccode = filter->control(control);
 
-            // Build leave trace
-            json::Value leaveTrace;
-            if (traceLevel >= PIPELINE_TRACE_LEVEL::METADATA) {
-                leaveTrace["lane"] = "invoke";
-                leaveTrace["invoke"] = classType.c_str();
-                leaveTrace["result"] = ccode ? "error" : "continue";
+                // Build leave trace
+                json::Value leaveTrace;
+                if (traceLevel >= PIPELINE_TRACE_LEVEL::METADATA) {
+                    leaveTrace["lane"] = "invoke";
+                    leaveTrace["invoke"] = classType.c_str();
+                    leaveTrace["result"] = ccode ? "error" : "continue";
 
-                if (ccode && ccode.code() != Ec::PreventDefault)
-                    leaveTrace["error"] = ccode.message();
+                    if (ccode && ccode.code() != Ec::PreventDefault)
+                        leaveTrace["error"] = ccode.message();
 
-                if (traceLevel >= PIPELINE_TRACE_LEVEL::FULL)
-                    leaveTrace["data"] = engine::python::pyjson::dictToJson(
-                        control.attr("model_dump")());
+                    if (traceLevel >= PIPELINE_TRACE_LEVEL::FULL)
+                        leaveTrace["data"] =
+                            engine::python::pyjson::dictToJson(
+                                control.attr("model_dump")());
+                }
+
+                level.leave(std::move(leaveTrace));
             }
-
-            passScope.left();
-            this->pipe->debugger.debugLeave(filter.get(), leaveTrace);
 
             if (ccode) throw ccode;
             return;
@@ -165,9 +168,8 @@ void IServiceFilterInstance::cb_control(std::string &classType,
                     control.attr("model_dump")());
         }
 
-        this->pipe->debugger.debugEnter(filter.get(), enterTrace);
-        // Ends the level if an exception skips every leave below
-        Debugger::PassScope passScope(this->pipe->debugger);
+        // The level ends (LEAVE sent) when this iteration's scope ends
+        Debugger::Level level(this->pipe->debugger, filter.get(), enterTrace);
 
         // Call the control function
         ccode = filter->control(control);
@@ -187,8 +189,7 @@ void IServiceFilterInstance::cb_control(std::string &classType,
             }
 
             // And inform we are leaving
-            passScope.left();
-            this->pipe->debugger.debugLeave(filter.get(), leaveTrace);
+            level.leave(std::move(leaveTrace));
             return;
         }
 
@@ -207,8 +208,7 @@ void IServiceFilterInstance::cb_control(std::string &classType,
             }
 
             // And inform we are leaving
-            passScope.left();
-            this->pipe->debugger.debugLeave(filter.get(), leaveTrace);
+            level.leave(std::move(leaveTrace));
             continue;
         }
 
@@ -222,8 +222,7 @@ void IServiceFilterInstance::cb_control(std::string &classType,
             leaveTrace["error"] = ccode.message();
         }
 
-        passScope.left();
-        this->pipe->debugger.debugLeave(filter.get(), leaveTrace);
+        level.leave(std::move(leaveTrace));
         throw ccode;
     }
 
