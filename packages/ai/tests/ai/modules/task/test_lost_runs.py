@@ -103,12 +103,23 @@ async def test_one_line_per_lost_run_every_ten_minutes_with_the_calls_since(lost
     assert len(lines) == 2 and json.loads(lines[1])['calls'] == 900
 
 
-async def test_a_key_no_deployment_has_is_written_as_unknown(lost):
-    runs, lines, _ = lost
+async def test_keys_no_deployment_has_are_counted_in_one_summary_line(lost):
+    runs, lines, clock = lost
     runs.refused('pk_' + 'f' * 32)
     await _settle(runs)
-    record = json.loads(lines[0])
+    (record,) = [json.loads(line) for line in lines]
+    assert record['level'] == 'error' and record['event'] == 'rocketride.task.lost_call_unknown'
     assert record['org_id'] == 'unknown' and 'project_id' not in record
+    assert (record['calls'], record['distinct_keys']) == (1, 1)
+    assert 'f' * 32 not in lines[0]  # never the key
+    for key in ('pk_' + 'e' * 32, 'pk_' + 'e' * 32, 'tk_' + 'd' * 32):
+        runs.refused(key)
+    assert len(lines) == 1  # one summary line every ten minutes
+    clock.now += lost_runs.LINE_EVERY_S
+    runs.refused('pk_' + 'f' * 32)  # the index is due a rebuild too: counted once it is done
+    await _settle(runs)
+    record = json.loads(lines[1])
+    assert (record['calls'], record['distinct_keys']) == (4, 3)
 
 
 async def test_the_registry_is_walked_at_most_every_ten_minutes(lost):
@@ -117,7 +128,7 @@ async def test_the_registry_is_walked_at_most_every_ten_minutes(lost):
     await _settle(runs)
     runs.refused('pk_' + '2' * 32)  # another miss right after: no second walk
     await _settle(runs)
-    assert runs._account.walks == 1 and len(lines) == 2
+    assert runs._account.walks == 1 and len(lines) == 1  # and one summary line for both
 
 
 def test_nothing_is_written_when_the_run_log_is_off(monkeypatch):
@@ -177,3 +188,37 @@ async def test_a_flood_of_made_up_keys_never_hides_a_real_lost_run(lost, monkeyp
     runs.refused(BETA_TK)
     await _settle(runs)
     assert any(json.loads(line)['org_id'] == 'org-beta' for line in lines if 'lost_call' in line)
+
+
+async def test_a_flood_of_made_up_keys_is_one_summary_line_and_known_keys_keep_theirs(lost, monkeypatch):
+    """1000 keys no run ever had, arriving while the index is built, and one real run's key."""
+    runs, lines, clock = lost
+    monkeypatch.setattr(lost_runs, 'MAX_KEYS', 100)
+    for n in range(1000):
+        runs.refused(f'tk_madeup{n:06d}')
+    runs.refused(ACME_PK)
+    assert len(runs._pending) <= 100 and len(runs._keys) <= 100  # bounded while the rebuild runs
+    await _settle(runs)
+    assert runs._pending == set()
+    records = [json.loads(line) for line in lines]
+    (known,) = [r for r in records if r['event'] == 'rocketride.task.lost_call']
+    assert known['org_id'] == 'org-acme'
+    (summary,) = [r for r in records if r['event'] == 'rocketride.task.lost_call_unknown']
+    assert summary['distinct_keys'] <= 100
+    for n in range(1000):  # the index is current: counted, no line, nothing remembered per key
+        runs.refused(f'pk_madeup{n:06d}')
+    clock.now += lost_runs.LINE_EVERY_S
+    runs.refused(ACME_PK)
+    assert len(lines) == 3 and json.loads(lines[2])['event'] == 'rocketride.task.lost_call'
+    assert len(runs._keys) <= 100 and runs._account.walks == 1
+
+
+async def test_a_slow_rebuild_has_one_callback_whatever_the_keys_waiting(lost):
+    runs, lines, _ = lost
+    walked = []
+    rebuilt = runs._rebuilt
+    runs._rebuilt = lambda task: (walked.append(len(runs._pending)), rebuilt(task))
+    for n in range(50):
+        runs.refused(f'pk_slow{n:06d}')
+    await _settle(runs)
+    assert walked == [50] and len(lines) == 1

@@ -36,9 +36,12 @@ engine's tk_ cannot be rebuilt (its line says org unknown); a pk_ still can.
 
 One ERROR line per key every 10 minutes (with the calls refused since the last
 line), at most 20 lines a minute in all: a customer's calls failing, kept by the
-errors-only log pipeline. The key itself is never written (it is a credential). A key that matches no deployment (a dev run from the IDE, a
-stale or made-up key) is written with org_id unknown. On only when the run
-error log is (telemetry or RR_LOG_FORMAT).
+errors-only log pipeline. The key itself is never written (it is a credential).
+Keys that match no deployment (a dev run from the IDE, a stale or made-up key)
+get no line of their own: they are counted, and one ERROR line every 10 minutes
+says how many calls were refused and for how many distinct keys, so a flood of
+made-up keys neither fills the log nor takes the known keys' lines. On only when
+the run error log is (telemetry or RR_LOG_FORMAT).
 """
 
 import asyncio
@@ -55,7 +58,7 @@ LINE_EVERY_S = 600.0  # one line per key every 10 minutes
 LINES_PER_MINUTE = 20  # in all, whatever the keys
 REBUILD_EVERY_S = 600.0  # a miss rebuilds the index at most every 10 minutes
 MAX_DEPLOYMENTS = 10000  # the registry walk stops there
-MAX_KEYS = 5000  # keys remembered between lines (a flood of made-up keys)
+MAX_KEYS = 5000  # keys remembered between lines (a flood of made-up keys), and keys waiting for a rebuild
 FETCH_CONCURRENCY = 8  # registry reads in flight during a rebuild
 
 Owner = Tuple[str, str, str]  # (org id, project id, source)
@@ -100,7 +103,11 @@ class LostRuns:
         self._index: Dict[str, Owner] = {}
         self._built: Optional[float] = None
         self._rebuilding: Optional['asyncio.Task[None]'] = None
-        self._pending: set = set()  # keys whose line waits for the rebuild
+        self._pending: set = set()  # keys whose line waits for the rebuild (at most MAX_KEYS)
+        # Refused calls for keys no deployment has, since their last summary line
+        self._unknown_calls = 0
+        self._unknown_keys: set = set()  # distinct ones (at most MAX_KEYS)
+        self._unknown_last: Optional[float] = None
         self._keys: Dict[str, _Seen] = {}
         # (org, team, project, version) -> its run keys: a rebuild reads only
         # deployments whose version moved (a billing team re-stamped without a
@@ -115,6 +122,11 @@ class LostRuns:
         if not key or not key.startswith(('tk_', 'pk_')) or not error_log.enabled():
             return
         now = self._clock()
+        if key not in self._index and not self._stale(now):
+            # no deployment has it (the index is current): counted, in the summary line
+            self._count_unknown(key, 1)
+            self._summary(now)
+            return
         seen = self._keys.get(key)
         if seen is None:
             if len(self._keys) >= MAX_KEYS:
@@ -125,8 +137,8 @@ class LostRuns:
         seen.calls += 1
         if seen.last is not None and now - seen.last < LINE_EVERY_S:
             return
-        if key not in self._index and self._stale(now):
-            # not known yet: rebuild the index, then write the line
+        if key not in self._index:
+            # not known yet: rebuild the index, then write the line (or count it)
             self._rebuild_then(key)
             return
         self._line(key, now)
@@ -142,10 +154,12 @@ class LostRuns:
             idle = seen.last if seen.last is not None else seen.first
             if (not seen.calls or seen.last is None) and now - idle >= LINE_EVERY_S:
                 del self._keys[key]
+                self._pending.discard(key)
         if len(self._keys) >= MAX_KEYS:
             unknown = sorted((seen.first, key) for key, seen in self._keys.items() if key not in self._index)
             for _first, key in unknown[: max(1, len(unknown) // 2)]:
                 del self._keys[key]
+                self._pending.discard(key)
 
     def _stale(self, now: float) -> bool:
         return self._built is None or now - self._built >= REBUILD_EVERY_S
@@ -154,14 +168,57 @@ class LostRuns:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            self._line(key, self._clock())
+            now = self._clock()
+            self._resolve(key, now)  # no rebuild without a loop: the index as it is
+            self._summary(now)
             return
         if self._rebuilding is None or self._rebuilding.done():
+            # one callback per rebuild: it walks the keys waiting for it
             self._rebuilding = loop.create_task(self._rebuild())
-            self._pending = set()
-        if key not in self._pending:
+            self._rebuilding.add_done_callback(self._rebuilt)
+        if len(self._pending) < MAX_KEYS:
             self._pending.add(key)
-            self._rebuilding.add_done_callback(lambda _: self._line(key, self._clock()))
+
+    def _rebuilt(self, _task: Any = None) -> None:
+        """The rebuild ended: a line for each waiting key a deployment has; the others are counted."""
+        now = self._clock()
+        pending, self._pending = self._pending, set()
+        for key in pending:
+            self._resolve(key, now)
+        self._summary(now)
+
+    def _resolve(self, key: str, now: float) -> None:
+        if key in self._index:
+            self._line(key, now)
+            return
+        seen = self._keys.pop(key, None)
+        if seen is not None:
+            self._count_unknown(key, seen.calls)
+
+    def _count_unknown(self, key: str, calls: int) -> None:
+        self._unknown_calls += calls
+        if len(self._unknown_keys) < MAX_KEYS:
+            self._unknown_keys.add(key)
+
+    def _summary(self, now: float) -> None:
+        """One line every LINE_EVERY_S for the calls refused for keys no deployment has (none: no line)."""
+        if not self._unknown_calls or (self._unknown_last is not None and now - self._unknown_last < LINE_EVERY_S):
+            return
+        calls, keys = self._unknown_calls, len(self._unknown_keys)
+        self._unknown_calls, self._unknown_keys, self._unknown_last = 0, set(), now
+        self._write(
+            logfmt.format_line(
+                'error',
+                error_log.LOGGER,
+                f'{calls} refused calls, {keys} distinct unknown keys: calls to a pipeline that is not running '
+                '(TASK_NOT_REGISTERED) with a run key no deployment has (a dev run, a stale or made-up key)',
+                logfmt.log_format(),
+                event='rocketride.task.lost_call_unknown',
+                org_id='unknown',
+                calls=calls,
+                distinct_keys=keys,
+            )
+        )
 
     def _line(self, key: str, now: float) -> None:
         seen = self._keys.get(key)
