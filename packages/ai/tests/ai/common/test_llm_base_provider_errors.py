@@ -19,6 +19,7 @@ import pytest
 
 import ai.common.llm_base as llm_base
 from ai.common.llm_base import LLMBase, provider_error_type
+from ai.common.telemetry import relay
 
 
 class _Object:
@@ -114,7 +115,7 @@ def test_the_error_line_names_the_question_trace(monkeypatch):
 def test_the_failure_marks_the_question_trace_redacted(monkeypatch):
     marks: List[Any] = []
     monkeypatch.setattr(llm_base, 'error', lambda *args: None)
-    monkeypatch.setattr(llm_base.relay, 'node_error', lambda kind, message: marks.append((kind, message)))
+    monkeypatch.setattr(relay, 'node_error', lambda kind, message: marks.append((kind, message)))
     node = _node(AuthenticationError('Incorrect API key provided: sk-proj-abcdefghijklmnopqrstuvwxyz123456'))
 
     node.writeQuestions(_Question())
@@ -136,7 +137,7 @@ def test_the_failure_marks_the_question_trace_redacted(monkeypatch):
 def test_provider_messages_reach_the_trace_without_the_key(monkeypatch, text, secret):
     marks: List[Any] = []
     monkeypatch.setattr(llm_base, 'error', lambda *args: None)
-    monkeypatch.setattr(llm_base.relay, 'node_error', lambda kind, message: marks.append(message))
+    monkeypatch.setattr(relay, 'node_error', lambda kind, message: marks.append(message))
 
     _node(AuthenticationError(text)).writeQuestions(_Question())
 
@@ -183,7 +184,7 @@ def test_report_llm_failure_logs_why_and_marks_the_question(monkeypatch):
     lines: List[str] = []
     marks: List[Any] = []
     monkeypatch.setattr(llm_base, 'error', lambda *args: lines.append(' '.join(map(str, args))))
-    monkeypatch.setattr(llm_base.relay, 'node_error', lambda kind, message: marks.append((kind, message)))
+    monkeypatch.setattr(relay, 'node_error', lambda kind, message: marks.append((kind, message)))
     instance = _Inner()
     instance.passTraceId = 'cd' * 16
 
@@ -245,7 +246,7 @@ def test_report_without_mark_logs_but_does_not_fail_the_question(monkeypatch):
     lines: List[str] = []
     marks: List[Any] = []
     monkeypatch.setattr(llm_base, 'error', lambda *args: lines.append(' '.join(map(str, args))))
-    monkeypatch.setattr(llm_base.relay, 'node_error', lambda kind, message: marks.append((kind, message)))
+    monkeypatch.setattr(relay, 'node_error', lambda kind, message: marks.append((kind, message)))
 
     llm_base.report_llm_failure('rocketride wave plan failed run_id=r2', _StatusError(503), mark=False)
 
@@ -357,7 +358,7 @@ def test_an_agents_python_instance_still_names_the_questions_trace(monkeypatch):
 
     lines = []
     monkeypatch.setattr(llm_base, 'error', lines.append)
-    monkeypatch.setattr(llm_base.relay, 'current_pass_trace_id', lambda: 0)
+    monkeypatch.setattr(relay, 'current_pass_trace_id', lambda: 0)
     python_instance = SimpleNamespace(instance=SimpleNamespace(passTraceId='ab' * 16))
     llm_base.report_llm_failure('agent failed', RuntimeError('x'), instance=python_instance, mark=False)
     assert lines and lines[0].endswith('pass_trace_id=' + 'ab' * 16)

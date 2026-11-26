@@ -5,8 +5,6 @@ import re
 from typing import Callable, List, Optional
 
 from rocketlib import IInstanceBase, error, invoke_function
-from ai.common import logfmt
-from ai.common.telemetry import relay
 from ai.common.schema import Question, Answer, AnswerError
 from ai.common.llm_native_stream import STOP_SEQUENCES_VAR
 from ai.common.llm_adapter import turn_usage
@@ -189,6 +187,10 @@ def report_llm_failure(
     (provider_error_type).
     """
     kind = provider_error_type(exc, default)
+    # Imported here: llm_base is imported by tests and tools that stub ai.common
+    from ai.common import logfmt
+    from ai.common.telemetry import relay
+
     trace_id = relay.current_pass_trace_id()
     pass_trace = f'{trace_id:032x}' if trace_id else ''
     if not pass_trace:
