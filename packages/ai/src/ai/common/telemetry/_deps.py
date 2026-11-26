@@ -721,6 +721,7 @@ def instrument(
         on_call=on_call,
         pass_trace_id=pass_trace_id,
         attempted=set(),
+        missing=set(),
         recorders=[],
     )
     # Stable semconv names (http.request.method, url.full, ...): before any
@@ -740,6 +741,21 @@ def instrument_new() -> List[str]:
     with _install_lock:
         done, _skipped = _instrument_available()
     return done
+
+
+def instrument_missing() -> Tuple[List[str], List[str]]:
+    """
+    Try again the instrumentations whose package was not installed (after
+    RR_OTEL_AUTO_INSTALL installed them): (recorded libraries, skipped with reasons).
+    Only those: the recorders and instrumentations already in place stay as they are.
+    """
+    if not _STATE:
+        return [], []
+    importlib.invalidate_caches()
+    with _install_lock:
+        _STATE['attempted'] -= _STATE['missing']
+        _STATE['missing'].clear()
+        return _instrument_available()
 
 
 def _instrument_available() -> Tuple[List[str], List[str]]:
@@ -777,6 +793,7 @@ def _instrument_available() -> Tuple[List[str], List[str]]:
 
             installed = version(package)
         except PackageNotFoundError:
+            _STATE['missing'].add(key)
             skipped.append(f'{library}: {package} not installed')
             continue
         except Exception as e:

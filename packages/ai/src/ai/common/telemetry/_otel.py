@@ -350,6 +350,7 @@ class _Invocation:
         'start',
         'stack',
         'components',
+        'left',
         'calls',
         'dropped',
         'error',
@@ -377,6 +378,8 @@ class _Invocation:
         self.stack: List[Tuple[str, float, float]] = []
         # (type, wall start, wall end, result, component id)
         self.components: List[Tuple[str, float, float, Optional[str], str]] = []
+        # Up to two ids of components that left, kept past the span cap (_carried)
+        self.left: List[str] = []
         # A node's own report that its call failed (relay.node_error):
         # (component type, wall time, error type, message)
         self.marks: List[Tuple[str, float, str, str]] = []
@@ -415,7 +418,7 @@ def _carried(invocation: '_Invocation') -> bool:
     component alone (a component's own open or close step, under a millisecond
     to a few hundred): no question there, and no answer time.
     """
-    ids = {c[4] for c in invocation.components} | {frame[0] for frame in invocation.stack}
+    ids = set(invocation.left) | {frame[0] for frame in invocation.stack}
     return len(ids) >= 2
 
 
@@ -1068,6 +1071,8 @@ class Telemetry:
         result = result if result in ('continue', 'skip', 'error') else None
         if result == 'error':
             invocation.error = True
+        if len(invocation.left) < 2 and str(component_id) not in invocation.left:
+            invocation.left.append(str(component_id))
         over_budget = False
         if len(invocation.components) >= self._span_cap:
             invocation.dropped += 1
@@ -1088,12 +1093,23 @@ class Telemetry:
         """Same run, new subprocess: its pipeline may differ, open calls are gone, counts restart at 0."""
         with self._lock:
             run = self._runs.get(task_id)
-            if run is not None:
-                run.types = None
-                self._release(run)
-                run.invocations.clear()
-                run.completed = run.failed = 0
-                run.tokens = {}
+            if run is None:
+                return
+            self._release(run)
+            open_passes = list(run.invocations.values())
+            run.invocations.clear()
+        # A pass open across the restart ended with the old process, as at a
+        # run's end: its turn (abandoned, unless it had failed) and its model calls count
+        now = time.time()
+        for invocation in open_passes:
+            self._emit_invocation(task_id, invocation, run, end=now, unclosed=True, why='task_end')
+        with self._lock:
+            # The new process may run another pipeline: its source and raised errors are not the old one's
+            run.types = None
+            run.source_type = ''
+            run.raised = None
+            run.completed = run.failed = 0
+            run.tokens = {}
 
     def task_ended(
         self,

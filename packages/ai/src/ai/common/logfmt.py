@@ -41,12 +41,19 @@ import sys
 import time
 from typing import Any, Mapping, Optional, TextIO
 
+from ai.common.secret_names import canonical, is_sensitive_param
+
 MAX_TEXT = 8192  # characters of msg/exc kept per line
 
 # Every repetition that a pattern can restart at many positions is bounded
 # ({0,40}, {1,64}...): unbounded ones made redaction quadratic in the text's length,
 # and a long request line (an access log) could stall the server.
-_SECRET_NAME = r'(?:api[_-]?key|apikey|key|token|secret|password|passwd|pwd|sig|signature|credentials?|cookie|session)'
+# Names whose value is a secret: the access log's list (secret_names), plus endings
+# only log text needs (AccountKey, x_sig, db_credentials, pwd). 'code' and 'state'
+# are OAuth's only on an OAuth line: elsewhere they are an exit code or a state.
+_LOG_SUFFIXES = ('key', 'sig', 'credential', 'credentials', 'cookie', 'session', 'pwd')
+_CONTEXT_ONLY = frozenset({'code', 'state'})
+_OAUTH_LINE = re.compile(r'(?i)oauth|callback|authori[sz]|redirect_uri|openid')
 _SECRETS = [
     # A private key block first: inside a "private_key": "..." value too
     (
@@ -76,8 +83,10 @@ _SECRETS = [
     (re.compile(r'\b(pcsk)_[A-Za-z0-9_]{20,}'), r'\1_[REDACTED]'),
     # A validation error quoting what it validated (pydantic: the prompt or the
     # document text a node sent): the value is the customer's content
+    # Up to pydantic's ', input_type=' (a dict or list nests, and its strings can hold
+    # any bracket), else to the end of the line
     (
-        re.compile(r'(input_value=)(?:\'(?:[^\'\\]|\\.)*\'|"(?:[^"\\]|\\.)*"|\{.*?\}|\[.*?\]|\S+)', re.DOTALL),
+        re.compile(r'(input_value=)(?:.{0,8192}?(?=, input_type=)|[^\n]*)', re.DOTALL),
         r'\1[REDACTED]',
     ),
     (re.compile(r'\b(sk|pk|rk)-[A-Za-z0-9_-]{8,}'), r'\1-[REDACTED]'),
@@ -85,27 +94,54 @@ _SECRETS = [
     (re.compile(r'\b(sk|pk|rk|tk|rr|whsec)_(?:(?:live|test)_)?[A-Za-z0-9]{8,}'), r'\1_[REDACTED]'),
     (re.compile(r'\b(AKIA|ASIA)[A-Z0-9]{12,}'), r'[REDACTED]'),
     (re.compile(r'\b(xox[abprs])-[A-Za-z0-9-]{8,}'), r'\1-[REDACTED]'),
-    # An Authorization or Cookie header, whatever its scheme or contents
+    # An Authorization header, whatever its scheme or contents
     (
-        re.compile(r'(?i)\b(authorization|cookie|set-cookie)(["\']?\s*[:=]\s*["\']?)[^\s"\',;}]+(?:\s+[^\s"\',;}]+)?'),
+        re.compile(r'(?i)\b(authorization)(["\']?\s*[:=]\s*["\']?)[^\s"\',;}]+(?:\s+[^\s"\',;}]+)?'),
         r'\1\2[REDACTED]',
     ),
-    # A quoted value (spaces allowed) whose name is or ends in a secret's name (matched
-    # at the name's end: mistral_api_key keeps mistral_api_, its value goes)
-    (
-        re.compile(r'(?i)(' + _SECRET_NAME + r')(["\']?\s*[=:]\s*)(["\'])(?:(?!\3)[^\n]){1,512}\3'),
-        r'\1\2\3[REDACTED]\3',
-    ),
-    # key=value / "key": value pairs whose name is or ends in a secret's name
-    # (api_key, mistral_api_key, aws_secret_access_key, AccountKey, refresh_token...)
-    (
-        re.compile(r'(?i)(' + _SECRET_NAME + r')(["\']?\s*[=:]\s*["\']?)[^\s&"\',;}]+'),
-        r'\1\2[REDACTED]',
-    ),
+    # A Cookie header: every pair to the end of the line (a=1; b=secret)
+    (re.compile(r'(?i)\b(cookie|set-cookie)(["\']?\s*[:=]\s*)[^\r\n"\']{1,4096}'), r'\1\2[REDACTED]'),
     # a secret's name, a space, then a long opaque value ("token abcd...", "X-Api-Key abcd...")
     (re.compile(r'(?i)\b(token|x-api-key|api[_-]?key)\s+[A-Za-z0-9._~+/=-]{20,}'), r'\1 [REDACTED]'),
     (re.compile(r'[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,24}'), '[EMAIL]'),
 ]
+
+
+# name=value, name: value or "name": "value": the name and its separator; the value
+# (quoted, spaces allowed, an unterminated quote runs to the end of the line; or
+# bare) is matched only after a secret's name, so the scan stays linear
+_NAME = re.compile(r'(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_.-]{0,63})(["\']?[ \t]{0,8}[=:][ \t]{0,8})')
+_VALUE = re.compile(r'(["\'])(?:(?!\1)[^\n]){1,512}(?:\1|[^\n]*)|[^\s&"\',;}]+')
+
+
+def _secret_name(name: str, oauth: bool) -> bool:
+    """Whether a name in log text names a secret (the shared list, the log-only endings, code/state on OAuth lines)."""
+    plain = canonical(name)
+    if plain in _CONTEXT_ONLY:
+        return oauth
+    return is_sensitive_param(name) or plain.endswith(_LOG_SUFFIXES)
+
+
+def _redact_pairs(text: str) -> str:
+    oauth = bool(_OAUTH_LINE.search(text))
+
+    out, pos = [], 0
+    while True:
+        match = _NAME.search(text, pos)
+        if match is None:
+            break
+        name, sep = match.group(1), match.group(2)
+        value = _VALUE.match(text, match.end()) if _secret_name(name, oauth) else None
+        if value is None:
+            out.append(text[pos : match.end()])
+            pos = match.end()
+            continue
+        quote = value.group(1) or ''
+        out.append(text[pos : match.start()])
+        out.append(f'{name}{sep}{quote}[REDACTED]{quote}')
+        pos = value.end()
+    out.append(text[pos:])
+    return ''.join(out)
 
 
 def redact(text: str) -> str:
@@ -116,6 +152,7 @@ def redact(text: str) -> str:
         text = text[:MAX_TEXT]
     for pattern, replacement in _SECRETS:
         text = pattern.sub(replacement, text)
+    text = _redact_pairs(text)
     return text + '… [truncated]' if truncated else text
 
 

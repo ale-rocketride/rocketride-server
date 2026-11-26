@@ -250,7 +250,7 @@ def _instrument_dependencies(impl: Any) -> None:
         done, skipped = impl.instrument_dependencies()
         missing = [reason for reason in skipped if reason.endswith('not installed')]
         if missing and _truthy(os.environ.get('RR_OTEL_AUTO_INSTALL')):
-            threading.Thread(target=_install_instrumentation, args=(impl,), name='otel-install', daemon=True).start()
+            threading.Thread(target=_install_instrumentation, name='otel-install', daemon=True).start()
             skipped = [reason for reason in skipped if reason not in missing]
         if done:
             debug(f'OpenTelemetry traces dependency calls: {", ".join(done)}')
@@ -260,17 +260,17 @@ def _instrument_dependencies(impl: Any) -> None:
         warning(f'OpenTelemetry does not trace dependency calls: {type(e).__name__}: {e}')
 
 
-def _install_instrumentation(impl: Any) -> None:
+def _install_instrumentation() -> None:
     try:
         from . import _deps
 
         _deps.install()
-        done, skipped = impl.instrument_dependencies()
+        # Only what was missing: instrument() again would install every recorder twice
+        done, skipped = _deps.instrument_missing()
         if done:
             debug(f'OpenTelemetry traces dependency calls: {", ".join(done)}')
         for reason in skipped:
-            if not reason.endswith('already instrumented'):  # by the first pass
-                warning(f'OpenTelemetry does not trace {reason}')
+            warning(f'OpenTelemetry does not trace {reason}')
     except Exception as e:
         warning(f'OpenTelemetry does not trace dependency calls: {type(e).__name__}: {e}')
 

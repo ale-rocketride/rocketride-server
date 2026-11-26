@@ -1311,6 +1311,44 @@ async def test_start_passes_only_the_operators_options(monkeypatch, saas, startu
 
 
 @pytest.mark.asyncio
+async def test_telemetry_options_are_the_servers_never_a_pipelines(monkeypatch):
+    """A pipeline's --otel_* arguments are dropped, and the server's come before
+    the pipeline's own (the task reads the first --otel_relay).
+    """
+    import ai.modules.task.task_engine as engine
+
+    _fake_db_account(monkeypatch)
+    monkeypatch.setattr(engine, '_is_saas_engine', lambda: False)
+    monkeypatch.setattr(engine, 'startup_args', lambda: [])
+    monkeypatch.setattr(engine.telemetry, 'child_arguments', lambda: ['--otel_pass_ids', '--otel_relay=db'])
+    t = _env_task(pipeline={'components': [{'id': 'src', 'provider': 'tools'}]})
+    t.source = 'src'
+    t._env_source = AsyncMock(return_value={})
+    t._restart_env = None
+    t._status = SimpleNamespace(name='', state=engine.TASK_STATE.NONE.value, exitMessage='', completed=False)
+    t._is_restarting = False
+    t._launch_args = {'args': ['--OTEL_RELAY=http,db', '--trace=debugOut --otel_pass_ids']}
+    t._server = MagicMock(_config={})
+    t._is_debugging = lambda: False
+    t._task_file_bytes = MagicMock(return_value=b'{}')
+    t._send_status_update = AsyncMock()
+    t._terminated = AsyncMock()
+    t._launcher = SubprocessLauncher(t._server)
+    monkeypatch.setattr(SubprocessLauncher, 'task_data_path', tempfile.gettempdir())
+
+    class Launched(Exception):
+        pass
+
+    spawn = AsyncMock(side_effect=Launched)
+    monkeypatch.setattr(engine.asyncio, 'create_subprocess_exec', spawn)
+    with pytest.raises(Launched):
+        await Task.start_task(t)
+
+    options = [a for a in spawn.call_args.args if a.lower().startswith(('--otel_', '--trace='))]
+    assert options == ['--otel_pass_ids', '--otel_relay=db', '--trace=debugOut']
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('available', [True, False])
 async def test_start_puts_the_pipelines_nodes_on_disk_before_the_spawn(monkeypatch, available):
     """The nodes a pipeline names that the server lacks are unpacked before the
@@ -2637,6 +2675,38 @@ async def test_a_reported_crash_ends_the_task(stop_requested, status, exit_code,
     await Task._terminated(t)
     assert (t._status.status, t._status.exitCode, t._status.exitMessage) == (status, exit_code, exit_message)
     assert run_log.end_run.await_args.args[0] == outcome
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_never_started_the_task_is_a_failed_start(monkeypatch):
+    """The launcher raised: no process, so the platform's start_failed, not start_error."""
+    import ai.modules.task.task_engine as engine
+
+    seen = []
+    monkeypatch.setattr(engine.telemetry, 'task_ended', lambda *args, **_kw: seen.append(args))
+    t = _ending_task(1)  # the status falls back to exit code 1 when there was no launch
+    t._reached_running = False
+    t._stop_requested = False
+    t._run_log = AsyncMock()
+    await Task._terminated(t)
+    ((_id, _identity, outcome, _reason, error_type, *_rest),) = seen
+    assert (outcome, error_type) == ('error', 'start_failed')
+
+
+@pytest.mark.asyncio
+async def test_a_failing_telemetry_call_never_breaks_teardown(monkeypatch):
+    """The run log still ends when the error log or telemetry raises."""
+    import ai.modules.task.task_engine as engine
+
+    def broken(*_args, **_kw):
+        raise RuntimeError('telemetry down')
+
+    monkeypatch.setattr(engine.telemetry, 'task_ended', broken)
+    t = _ending_task(1)
+    run_log = t._run_log = AsyncMock()
+    await Task._terminated(t)
+    run_log.end_run.assert_awaited_once()
+    assert run_log.end_run.await_args.args[0] == 'error'
 
 
 # ---------------------------------------------------------------------------

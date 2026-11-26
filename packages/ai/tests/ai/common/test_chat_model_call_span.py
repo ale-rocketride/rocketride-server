@@ -99,6 +99,20 @@ def test_a_stream_closed_with_an_error_after_output_is_a_failed_call(calls, monk
     assert error_type == 'provider_unavailable' and 'after output' in message
 
 
+def test_a_stream_broken_after_output_fails_even_when_the_caller_gave_no_on_finish(calls, monkeypatch):
+    # writeQuestions streams with on_chunk only: the break must still reach the call
+    def broken_stream(self, prompt, on_chunk, on_finish, on_reasoning_chunk):
+        on_chunk('partial')
+        if on_finish is not None:
+            on_finish('error')
+        return ''
+
+    monkeypatch.setattr(_Driver, '_chat_string', broken_stream)
+    assert _Driver([]).chat_string('hi', on_chunk=lambda t: None) == ''
+    ((*_head, error_type, message, _retries, _usage),) = calls
+    assert error_type == 'provider_unavailable' and 'after output' in message
+
+
 @pytest.fixture
 def written(monkeypatch):
     lines = []

@@ -791,6 +791,34 @@ def test_a_pass_open_when_the_user_stops_the_run_is_abandoned(sink):
     assert _turns(reader) == {('abandoned', None, None): 1}
 
 
+def test_a_pass_open_at_a_restart_is_abandoned_and_its_model_calls_count(sink):
+    """The user restarts a chat mid-answer: the turn is abandoned, its model call is still measured."""
+    telemetry, _, reader = sink
+    _begin(telemetry, 'tok.chat_1')
+    t = time.time()
+    telemetry.component_trace('tok.chat_1', 'enter', 3, 'my_llm', t, {}, PIPELINE)
+    telemetry.dependency_relayed(
+        'tok.chat_1',
+        {
+            'calls': [
+                {
+                    'k': 'gen',
+                    's': int(t * 1e9),
+                    'e': int((t + 0.5) * 1e9),
+                    'p': 3,
+                    'c': 'my_llm',
+                    'a': {'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': 'openai'},
+                }
+            ]
+        },
+        PIPELINE,
+    )
+    telemetry.task_restarted('tok.chat_1')
+    telemetry.flush_measurements()
+    assert _turns(reader) == {('abandoned', None, None): 1}
+    assert _points_of(reader, 'gen_ai.client.operation.duration')
+
+
 def test_a_pass_open_when_the_run_fails_is_the_platforms_failed_turn(sink):
     telemetry, _, reader = sink
     _begin(telemetry, 'tok.chat_1')
@@ -928,6 +956,25 @@ def test_a_turn_records_its_answer_time_by_server(sink):
     assert attributes['server.address'] == 'api.openai.com' and attributes['rocketride.turn.outcome'] == 'ok'
     assert 'rocketride.org.id' not in attributes
     assert points[0].count == 1 and 1.0 <= points[0].sum <= 2.0
+
+
+def test_a_pass_carries_its_question_past_the_component_span_cap():
+    """RR_OTEL_COMPONENT_SPANS=0 keeps no component span; the answer time still counts."""
+    spans, reader = InMemorySpanExporter(), InMemoryMetricReader()
+    telemetry = Telemetry(span_exporter=spans, metric_reader=reader, sample_ratio=1.0, component_span_cap=0)
+    try:
+        _begin(telemetry, 'tok.chat_1')
+        t = time.time()
+        telemetry.component_trace('tok.chat_1', 'enter', 3, 'my_llm', t, {}, PIPELINE)
+        telemetry.component_trace('tok.chat_1', 'enter', 3, 'parse_1', t + 0.1, {}, PIPELINE)
+        telemetry.component_trace('tok.chat_1', 'leave', 3, 'parse_1', t + 0.2, {'result': 'continue'}, PIPELINE)
+        telemetry.component_trace('tok.chat_1', 'leave', 3, 'my_llm', t + 0.3, {'result': 'continue'}, PIPELINE)
+        telemetry.flush_measurements()
+        data = reader.get_metrics_data()
+        names = {m.name for rm in data.resource_metrics for sm in rm.scope_metrics for m in sm.metrics}
+        assert 'rocketride.turn.duration' in names
+    finally:
+        telemetry.shutdown(1)
 
 
 def test_the_answer_time_names_the_source_type(sink):

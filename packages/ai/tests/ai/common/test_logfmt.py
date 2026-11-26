@@ -181,7 +181,16 @@ def test_ordinary_error_text_is_kept():
 
 @pytest.mark.parametrize(
     'text',
-    ['GET /' + 'a.' * 8000 + ' HTTP/1.1', 'a.' * 16000, 'key=' * 4000, 'x@' * 8000, 'https://' * 3000],
+    [
+        'GET /' + 'a.' * 8000 + ' HTTP/1.1',
+        'a.' * 16000,
+        'key=' * 4000,
+        'x@' * 8000,
+        'https://' * 3000,
+        'password="' * 2000,
+        'a=' * 4000,
+        'input_value=' * 1000,
+    ],
 )
 def test_redaction_time_stays_linear_on_hostile_text(text):
     """A long request line (an access log line anyone can cause) must never stall the server."""
@@ -189,6 +198,50 @@ def test_redaction_time_stays_linear_on_hostile_text(text):
 
     from ai.common.logfmt import redact
 
-    started = time.perf_counter()
+    # CPU time, not wall time: a busy test runner must not fail it
+    started = time.process_time()
     redact(text)
-    assert time.perf_counter() - started < 0.5
+    assert time.process_time() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    'text, kept, gone',
+    [
+        # every pair of a Cookie header, not only the first
+        ('cookie: a=1; b=SECRET2', 'cookie: ', 'SECRET2'),
+        ('Set-Cookie: sid=AAA; csrftoken=SECRET3; Path=/', 'Set-Cookie: ', 'SECRET3'),
+        # a nested dict in a validation error: everything up to input_type
+        (
+            "input_value={'a': {'b': 'inner'}, 'prompt': 'CUSTOMER TEXT here'}, input_type=dict",
+            'input_type=dict',
+            'CUSTOMER TEXT',
+        ),
+        # a quoted secret whose closing quote was cut off
+        ('password="my secret phrase', 'password=', 'secret phrase'),
+        ('note: api_key="' + 'x' * 600 + ' tail', 'api_key=', 'tail'),
+        # the access log's names, in free text too
+        ('auth=S3CRETVALUE123', 'auth=', 'S3CRETVALUE123'),
+        ('session_id=S3CRETVALUE123', 'session_id=', 'S3CRETVALUE123'),
+        ('sessionid=S3CRETVALUE123', 'sessionid=', 'S3CRETVALUE123'),
+        ('code_verifier=S3CRETVALUE123', 'code_verifier=', 'S3CRETVALUE123'),
+        ('tokens=S3CRETVALUE123', 'tokens=', 'S3CRETVALUE123'),
+        ('jwt=S3CRETVALUE123', 'jwt=', 'S3CRETVALUE123'),
+        ('bearer=S3CRETVALUE123', 'bearer=', 'S3CRETVALUE123'),
+        # code and state on an OAuth line
+        ('oauth callback failed code=4/0AXsecret state=S3CRET', 'callback failed', '4/0AXsecret'),
+        # a value that is not a secret hides no secret after it
+        ('msg="unterminated password=S3CRETVALUE123', 'msg=', 'S3CRETVALUE123'),
+    ],
+)
+def test_secrets_are_redacted(text, kept, gone):
+    from ai.common.logfmt import redact
+
+    out = redact(text)
+    assert kept in out and gone not in out, out
+
+
+@pytest.mark.parametrize('text', ['process exit code=1', 'task state=running', 'error_code=E42', 'primary=1 total=3'])
+def test_codes_and_states_outside_oauth_are_kept(text):
+    from ai.common.logfmt import redact
+
+    assert redact(text) == text

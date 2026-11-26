@@ -2225,31 +2225,38 @@ class Task(DAPBase):
         # Telemetry counts the same outcome the run log records.
         outcome = None
         if not self._is_restarting:
-            # A traceback still being collected is written now, before the run's
-            # trace is decided (an error log keeps it)
-            self._error_log.flush()
+            # Pure: the run log always gets an outcome
             outcome = classify_run_outcome(self._stop_requested, self._stop_reason, self._status.exitCode)
             # A crash nobody asked for is an error whatever the exit code read
             if self._crash and not self._stop_requested:
                 outcome = 'error'
-            telemetry.task_ended(
-                self.id,
-                self._telemetry_identity(),
-                outcome,
-                self._stop_reason if self._stop_requested else None,
-                classify_error_type(
-                    self._stop_reason,
-                    self._status.exitCode,
-                    self._reached_running,
-                    self._stop_interrupted,
-                    self._exit_error_code,
+            try:
+                # A traceback still being collected is written now, before the run's
+                # trace is decided (an error log keeps it)
+                self._error_log.flush()
+                telemetry.task_ended(
+                    self.id,
+                    self._telemetry_identity(),
+                    outcome,
+                    self._stop_reason if self._stop_requested else None,
+                    classify_error_type(
+                        self._stop_reason,
+                        # No launch: the runtime never started the task (start_failed),
+                        # whatever exit code the status fell back to
+                        self._status.exitCode if self._launch is not None else None,
+                        self._reached_running,
+                        self._stop_interrupted,
+                        self._exit_error_code,
+                    )
+                    if outcome == 'error'
+                    else None,
+                    self._exit_error_code if outcome == 'error' else None,
+                    self._error_log.first if outcome == 'error' else None,
+                    self._exit_cause() if outcome == 'error' else None,
                 )
-                if outcome == 'error'
-                else None,
-                self._exit_error_code if outcome == 'error' else None,
-                self._error_log.first if outcome == 'error' else None,
-                self._exit_cause() if outcome == 'error' else None,
-            )
+            except Exception as e:
+                # Best-effort: never blocks or breaks teardown
+                self.debug_message(f'Run error log or telemetry failed: {e}')
 
         if self._run_log is not None:
             try:
@@ -2615,12 +2622,6 @@ class Task(DAPBase):
         Args:
             message: Event message from subprocess
         """
-        # Update event timing
-        self._last_event_time = time.time()
-
-        # Add task token for correlation
-        message['__id'] = self.id
-
         # Extract event details
         event_type = message.get('event', '')
         body = message.get('body', {})
@@ -2629,6 +2630,18 @@ class Task(DAPBase):
         # one line to tell a chained exception from the end)
         if event_type != 'output':
             self._error_log.settle()
+
+        # A node's dependency calls are for telemetry only: not forwarded, and not
+        # activity (neither the idle timer nor the stalled-start check moves for them)
+        if event_type == 'apaevt_dependency':
+            telemetry.dependency_relayed(self.id, body, self._pipeline)
+            return
+
+        # Update event timing
+        self._last_event_time = time.time()
+
+        # Add task token for correlation
+        message['__id'] = self.id
 
         # Channel signals are for this Task alone: not forwarded, not activity
         if event_type == 'apaevt_channel':
@@ -2780,10 +2793,6 @@ class Task(DAPBase):
 
                 # Forward off the event
                 await self._forward_task_event(EVENT_TYPE.FLOW, flow)
-
-        # A node's dependency call, for telemetry only: never forwarded to clients
-        elif event_type == 'apaevt_dependency':
-            telemetry.dependency_relayed(self.id, body, self._pipeline)
 
         # Handle real-time node-to-UI SSE messages (pass-through, no status tracking)
         elif event_type == 'apaevt_sse':
@@ -3310,8 +3319,10 @@ class Task(DAPBase):
             # ahead of the pipeline's own: the task reads the first --otel_relay
             child_args: List[str] = list(telemetry.child_arguments())
             for arg in _user_args():
-                # Crash dumps are the operator's call, so a pipeline's own --dumps is skipped
-                if arg.split('=', 1)[0].lower() != '--dumps':
+                option = arg.split('=', 1)[0].lower()
+                # Crash dumps are the operator's call, so a pipeline's own --dumps is
+                # skipped; telemetry's options are the server's, never a pipeline's
+                if option != '--dumps' and not option.startswith('--otel_'):
                     child_args.append(arg)
 
             # The engine's own options: --dumps always, trace unless the caller set one

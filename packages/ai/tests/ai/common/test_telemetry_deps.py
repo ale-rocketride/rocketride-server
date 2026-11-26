@@ -864,3 +864,23 @@ def test_only_known_safe_attributes_leave_a_dependency_span():
     span.end()
     clean = dict(_deps.sanitized(span, logfmt.redact).attributes)
     assert clean == {'db.system.name': 'postgresql', 'db.operation.name': 'SELECT', 'server.address': 'db.internal'}
+
+
+def test_retrying_missing_instrumentations_installs_no_recorder_twice(monkeypatch):
+    """RR_OTEL_AUTO_INSTALL retries only what was missing: every call recorded once."""
+    installs = []
+
+    class Recorder:
+        def __init__(self, on_call):
+            pass
+
+        def install(self):
+            installs.append(1)
+            return True
+
+    monkeypatch.setattr(_deps, 'RECORDERS', [('db', 'json', Recorder)])
+    monkeypatch.setattr(_deps, 'INSTRUMENTATIONS', [])
+    monkeypatch.setattr(_deps, '_STATE', {})
+    _deps.instrument(None, ['db'], lambda call: None)
+    assert _deps.instrument_missing() == ([], [])
+    assert installs == [1]

@@ -669,9 +669,9 @@ class ChatBase:
         call_token, usage_token = _MODEL_CALL.set(call), begin_call_usage()
         error: Optional[BaseException] = None
         try:
-            return self._chat_string(
-                prompt, on_chunk, on_finish_w if on_finish is not None else None, on_reasoning_chunk
-            )
+            # Always the wrapper: a stream that breaks after its first chunk closes
+            # with on_finish('error'), and the call must not read as a success
+            return self._chat_string(prompt, on_chunk, on_finish_w, on_reasoning_chunk)
         except Exception as e:
             error = call.failure or e
             raise
@@ -778,7 +778,11 @@ class ChatBase:
                 self._no_second_hosted_request(e)
                 call = _MODEL_CALL.get()
                 if call is not None:
-                    call.retried(e, 0.0)
+                    if emitted['any']:
+                        # No retry once text reached the UI: this error ends the call
+                        call.failure = e
+                    else:
+                        call.retried(e, 0.0)
                 warning(
                     f'Streaming disabled for model={self._model} '
                     f'({type(e).__name__}): {e}. Falling back to non-streaming response.'
