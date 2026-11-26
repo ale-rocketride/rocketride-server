@@ -86,9 +86,9 @@ _SECRETS = [
     # A validation error quoting what it validated (pydantic: the prompt or the
     # document text a node sent): the value is the customer's content
     # Up to pydantic's ', input_type=' (a dict or list nests, and its strings can hold
-    # any bracket), else to the end of the line
+    # any bracket; repr() keeps it on one line), else to the end of the line
     (
-        re.compile(r'(input_value=)(?:.{0,8192}?(?=, input_type=)|[^\n]*)', re.DOTALL),
+        re.compile(r'(input_value=)(?:[^\n]{0,8192}?(?=, input_type=)|[^\n]*)'),
         r'\1[REDACTED]',
     ),
     (re.compile(r'\b(sk|pk|rk)-[A-Za-z0-9_-]{8,}'), r'\1-[REDACTED]'),
