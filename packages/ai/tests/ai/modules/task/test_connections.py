@@ -124,13 +124,22 @@ def test_disconnects_by_reason_who_closed_and_code(otel):
     }
 
 
-def test_how_long_connections_stayed_open(otel):
-    import time
+def test_how_long_connections_stayed_open(otel, monkeypatch):
+    from types import SimpleNamespace
 
-    connections.disconnected(_Conn(_Account('org-acme', 'u-1'), closed_by='client', code=1001), time.monotonic() - 5)
-    ((key, count),) = _points(otel, 'rocketride.ws.connection.duration').items()
-    assert dict(key) == {'rocketride.ws.disconnect.reason': 'closed', 'rocketride.ws.closed_by': 'client'}
-    assert count == 1
+    # a frozen clock for this module only: exactly 5 s
+    monkeypatch.setattr(connections, 'time', SimpleNamespace(monotonic=lambda: 1005.0))
+    connections.disconnected(_Conn(_Account('org-acme', 'u-1'), closed_by='client', code=1001), 1000.0)
+    (point,) = [
+        point
+        for rm in otel.get_metrics_data().resource_metrics
+        for sm in rm.scope_metrics
+        for metric in sm.metrics
+        if metric.name == 'rocketride.ws.connection.duration'
+        for point in metric.data.data_points
+    ]
+    assert dict(point.attributes) == {'rocketride.ws.disconnect.reason': 'closed', 'rocketride.ws.closed_by': 'client'}
+    assert point.count == 1 and point.sum == 5.0
 
 
 def _capped(monkeypatch, org_cardinality, **kwargs):

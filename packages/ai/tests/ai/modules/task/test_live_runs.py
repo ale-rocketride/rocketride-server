@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from ai.account.store import VersionMismatchError
 from ai.account.store_providers.memory.memory import MemoryStore
 from ai.modules.task import live_runs
 from ai.modules.task.live_runs import LiveRuns
@@ -73,7 +74,7 @@ async def test_a_reader_that_read_before_the_claim_loses(lost):
     _, version = await store.read_file_with_metadata('engine/live-runs/dead.json')
     await _healthy(LiveRuns(lambda: [], store=store, instance_id='b', clock=clock)).tick()
     # another engine's claim on the version it read before: refused
-    with pytest.raises(Exception):
+    with pytest.raises(VersionMismatchError):
         await store.write_file_atomic('engine/live-runs/dead.json', '{}', expected_version=version)
     assert lost == [ACME]
 
@@ -119,7 +120,8 @@ class _FailingStore(MemoryStore):
 async def test_after_a_store_outage_an_engine_that_cannot_write_judges_nobody(lost):
     store, clock = _FailingStore(), _Clock()
     await LiveRuns(lambda: [ACME], store=store, instance_id='alive', clock=clock).tick()
-    me = LiveRuns(lambda: [], store=store, instance_id='me', clock=clock)
+    me = _healthy(LiveRuns(lambda: [], store=store, instance_id='me', clock=clock))
+    await me.tick()  # healthy: may judge (nothing stale yet)
     store.fail = True
     clock.now += live_runs.STALE_S + 1  # every file looks stale
     with pytest.raises(OSError):
@@ -141,7 +143,15 @@ async def test_each_lost_run_is_one_error_line_naming_its_pipeline(lost, monkeyp
 async def test_an_engine_just_able_to_write_again_waits_before_judging(lost):
     store, clock = _FailingStore(), _Clock()
     await LiveRuns(lambda: [ACME], store=store, instance_id='alive', clock=clock).tick()
-    me = LiveRuns(lambda: [], store=store, instance_id='me', clock=clock)
-    clock.now += live_runs.STALE_S + 1  # the store was down: the other file is stale
+    me = _healthy(LiveRuns(lambda: [], store=store, instance_id='me', clock=clock))
+    await me.tick()  # healthy first
+    store.fail = True
+    clock.now += live_runs.STALE_S + 1  # the store is down: the other file goes stale
+    with pytest.raises(OSError):
+        await me.tick()  # the failed heartbeat ends its health
+    store.fail = False
     await me.tick()  # the store is back: my first write works
     assert lost == []  # the other engine has had no interval to write yet
+    clock.now += 2 * live_runs.INTERVAL_S
+    await me.tick()  # healthy for two intervals, and the other file is still stale
+    assert lost == [ACME]

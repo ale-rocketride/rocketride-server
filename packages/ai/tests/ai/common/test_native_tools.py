@@ -443,13 +443,11 @@ def test_a_failed_stream_falls_back_to_one_invoke(monkeypatch):
 
 def test_a_turn_is_one_model_call_with_its_failed_stream_as_a_retry(monkeypatch):
     # The trace's GenAI span: one logical call per turn, as for a prompt (chat_string)
-    from ai.common import chat as chat_module
     from ai.common.telemetry import relay
 
     calls = []
     monkeypatch.setattr(relay, 'model_call', lambda *args: calls.append(args))
     monkeypatch.setattr(relay, '_write', lambda line: None)  # the relay on, as in a task process
-    monkeypatch.setattr(chat_module, '_error_kind', lambda e: 'provider_invalid_request')
     reply = {
         'id': 'msg_3',
         'type': 'message',
@@ -470,7 +468,8 @@ def test_a_turn_is_one_model_call_with_its_failed_stream_as_a_retry(monkeypatch)
     ((operation, provider, model, start, end, error_type, message, retries, _usage),) = calls
     assert (operation, provider, model, error_type, message) == ('chat', 'anthropic', 'claude-sonnet-4-6', None, '')
     assert end >= start > 0
-    assert retries and all(kind == 'provider_invalid_request' and wait == 0.0 for _at, kind, wait in retries)
+    # the production classifier: a 400 the provider refused is provider_error (another 4xx)
+    assert retries and all(kind == 'provider_error' and wait == 0.0 for _at, kind, wait in retries)
 
 
 def test_an_openai_reasoning_turn_round_trips_encrypted_reasoning(monkeypatch):
