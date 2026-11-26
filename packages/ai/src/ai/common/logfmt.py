@@ -53,6 +53,8 @@ MAX_TEXT = 8192  # characters of msg/exc kept per line
 # are OAuth's only on an OAuth line: elsewhere they are an exit code or a state.
 _LOG_SUFFIXES = ('key', 'sig', 'credential', 'credentials', 'cookie', 'session', 'pwd')
 _CONTEXT_ONLY = frozenset({'code', 'state'})
+# One auth-param of an Authorization header (name=token or name="quoted, escapes allowed")
+_AUTH_PARAM = r'[A-Za-z0-9_-]{1,64}=(?:"(?:\\.|[^"\\\r\n]){0,1024}"?|[^\s,;"\']{1,1024})'
 _OAUTH_LINE = re.compile(r'(?i)oauth|callback|authori[sz]|redirect_uri|openid')
 _SECRETS = [
     # A private key block first: inside a "private_key": "..." value too
@@ -94,9 +96,19 @@ _SECRETS = [
     (re.compile(r'\b(sk|pk|rk|tk|rr|whsec)_(?:(?:live|test)_)?[A-Za-z0-9]{8,}'), r'\1_[REDACTED]'),
     (re.compile(r'\b(AKIA|ASIA)[A-Z0-9]{12,}'), r'[REDACTED]'),
     (re.compile(r'\b(xox[abprs])-[A-Za-z0-9-]{8,}'), r'\1-[REDACTED]'),
-    # An Authorization header, whatever its scheme or contents
+    # An Authorization header, whatever its scheme or contents: a quoted value to its
+    # closing quote (escapes skipped); a bare one is its scheme and its credentials,
+    # a token or the scheme's name=value parameters (Digest: quoted, comma-separated)
     (
-        re.compile(r'(?i)\b(authorization)(["\']?\s*[:=]\s*["\']?)[^\s"\',;}]+(?:\s+[^\s"\',;}]+)?'),
+        re.compile(r'(?i)\b(authorization)(["\']?\s*[:=]\s*)(["\'])(?:\\.|(?!\3)[^\\\r\n]){0,4096}\3?'),
+        r'\1\2\3[REDACTED]\3',
+    ),
+    (
+        re.compile(
+            r'(?i)\b(authorization)(["\']?\s*[:=]\s*)(?!["\'\s])[^\s"\',;}]{1,256}'
+            r'(?:[ \t]{1,8}(?:' + _AUTH_PARAM + r'(?:[ \t]{0,8},[ \t]{0,8}' + _AUTH_PARAM + r'){0,32}'
+            r'|[A-Za-z0-9._~+/=\[\]-]{1,4096}))?'
+        ),
         r'\1\2[REDACTED]',
     ),
     # A Cookie header: every pair to the end of the line (a=1; b=secret)
@@ -108,10 +120,10 @@ _SECRETS = [
 
 
 # name=value, name: value or "name": "value": the name and its separator; the value
-# (quoted, spaces allowed, an unterminated quote runs to the end of the line; or
+# (quoted, spaces and escaped quotes allowed, an unterminated quote runs to the end of the line; or
 # bare) is matched only after a secret's name, so the scan stays linear
 _NAME = re.compile(r'(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_.-]{0,63})(["\']?[ \t]{0,8}[=:][ \t]{0,8})')
-_VALUE = re.compile(r'(["\'])(?:(?!\1)[^\n]){1,512}(?:\1|[^\n]*)|[^\s&"\',;}]+')
+_VALUE = re.compile(r'(["\'])(?:\\.|(?!\1)[^\\\n]){1,512}(?:\1|[^\n]*)|[^\s&"\',;}]+')
 
 
 def _secret_name(name: str, oauth: bool) -> bool:
@@ -122,8 +134,7 @@ def _secret_name(name: str, oauth: bool) -> bool:
     return is_sensitive_param(name) or plain.endswith(_LOG_SUFFIXES)
 
 
-def _redact_pairs(text: str) -> str:
-    oauth = bool(_OAUTH_LINE.search(text))
+def _redact_pairs(text: str, oauth: bool) -> str:
 
     out, pos = [], 0
     while True:
@@ -150,9 +161,11 @@ def redact(text: str) -> str:
     truncated = len(text) > MAX_TEXT
     if truncated:
         text = text[:MAX_TEXT]
+    # before the URL pattern cuts the path that says so (/oauth/callback)
+    oauth = bool(_OAUTH_LINE.search(text))
     for pattern, replacement in _SECRETS:
         text = pattern.sub(replacement, text)
-    text = _redact_pairs(text)
+    text = _redact_pairs(text, oauth)
     return text + '… [truncated]' if truncated else text
 
 

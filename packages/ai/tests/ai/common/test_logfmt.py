@@ -145,12 +145,27 @@ def test_underscore_keys_are_redacted():
         ('Cookie: session=abc123def456', 'abc123def456'),
         ('pcsk_abcdefghij1234567890xyz', 'abcdefghij1234567890'),
         ('token abcdefghijklmnopqrstuvwxyz012', 'abcdefghijklmnopqrstuvwxyz012'),
+        ('{"password":"abc\\"right tail"}', 'right tail'),
+        ('Authorization: Digest username="alice", response="shortdigest"', 'shortdigest'),
+        ('Authorization: Digest username="alice", response="shortdigest"', 'alice'),
+        ('{"Authorization": "Bearer abc\\"def"}', 'def'),
+        ('https://example.test/oauth/callback code=abc123 state=def456', 'abc123'),
+        ('https://example.test/oauth/callback code=abc123 state=def456', 'def456'),
     ],
 )
 def test_tokens_in_urls_headers_and_quoted_inputs_are_redacted(text, secret):
     from ai.common.logfmt import redact
 
     assert secret not in redact(text)
+
+
+def test_a_quoted_authorization_value_ends_at_its_quote():
+    from ai.common.logfmt import redact
+
+    assert (
+        redact('{"Authorization": "Digest a=\\"1\\"", "status": 401}')
+        == '{"Authorization": "[REDACTED]", "status": 401}'
+    )
 
 
 def test_a_url_keeps_its_scheme_and_host():
