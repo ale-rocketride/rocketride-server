@@ -86,6 +86,7 @@ def _install_min_stubs() -> None:
     rocketlib.IGlobalBase = _IGlobalBase
     rocketlib.debug = _noop
     rocketlib.warning = _noop
+    rocketlib.error = _noop
     sys.modules['rocketlib'] = rocketlib
 
     ai = types.ModuleType('ai')
@@ -428,3 +429,38 @@ def test_text_only_result_is_not_broken_by_the_diagnostic(adapter, monkeypatch) 
     assert captured == [], 'diagnostic raised and discarded a usable result'
     assert len(pages) == 1
     assert pages[0][0][1] == 'hello'
+
+
+def test_content_failures_first_error_then_warning(adapter, monkeypatch) -> None:
+    """The first failed page of an object is an ERROR, the next ones WARNINGs; a new object starts again."""
+    lines: list[tuple[str, str]] = []
+    monkeypatch.setattr(_iglobal_mod, 'error', lambda msg: lines.append(('ERROR', msg)))
+    monkeypatch.setattr(_iglobal_mod, 'warning', lambda msg: lines.append(('WARNING', msg)))
+    adapter._ocr = _RaisingOcr()
+
+    adapter.new_object()
+    adapter.content(_StubDocument())
+    adapter.content(_StubDocument())
+    assert [level for level, _ in lines] == ['ERROR', 'WARNING']
+    assert all(msg.startswith('OCR content() failed: boom') for _, msg in lines)
+
+    lines.clear()
+    adapter.new_object()
+    adapter.content(_StubDocument())
+    assert [level for level, _ in lines] == ['ERROR']
+
+
+def test_failure_levels_are_kept_per_thread(adapter, monkeypatch) -> None:
+    """The adapter is shared by every instance: another thread's first failure is still an ERROR."""
+    import threading
+
+    lines: list[str] = []
+    monkeypatch.setattr(_iglobal_mod, 'error', lambda msg: lines.append('ERROR'))
+    monkeypatch.setattr(_iglobal_mod, 'warning', lambda msg: lines.append('WARNING'))
+    adapter._ocr = _RaisingOcr()
+
+    adapter.content(_StubDocument())
+    worker = threading.Thread(target=adapter.content, args=(_StubDocument(),))
+    worker.start()
+    worker.join()
+    assert lines == ['ERROR', 'ERROR']

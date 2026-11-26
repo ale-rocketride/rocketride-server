@@ -44,6 +44,18 @@ class IInstance(LLMBase):
     _cached_answer: str = None
     _cache_from_image: bool = False
 
+    def open(self, obj):
+        """Start an object: its first inference failure is logged at ERROR again."""
+        self._failures_logged = set()
+
+    def _log_failure(self, kind: str, message: str) -> None:
+        """Log the first failure of a kind per object at ERROR and the later ones at WARNING."""
+        logged = getattr(self, '_failures_logged', None)
+        if logged is None:
+            logged = self._failures_logged = set()
+        (warning if kind in logged else error)(message)
+        logged.add(kind)
+
     def writeImage(self, action: int, mimeType: str, buffer: bytes):
         """Handle AVI image protocol for streaming image frames."""
         if action == AVI_ACTION.BEGIN:
@@ -82,7 +94,7 @@ class IInstance(LLMBase):
                     self._cache_from_image = True
                     self.instance.writeText(answer_text)
                 except Exception as e:
-                    error(f'Gemini Vision: inference failed for image frame: {e}')
+                    self._log_failure('frame', f'Gemini Vision: inference failed for image frame: {e}')
 
             self.image_data = None
             return self.preventDefault()
@@ -119,7 +131,7 @@ class IInstance(LLMBase):
                     answer_text = answer.getText()
                 except Exception as e:
                     chunk_id = doc.metadata.chunkId if doc.metadata else 'unknown'
-                    error(f'Gemini Vision: inference failed for chunk {chunk_id}: {e}')
+                    self._log_failure('chunk', f'Gemini Vision: inference failed for chunk {chunk_id}: {e}')
                     continue
                 # Cache so writeImage can reuse it if it fires after us.
                 self._cached_answer = answer_text

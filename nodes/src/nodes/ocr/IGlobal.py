@@ -25,7 +25,7 @@ import os
 import io
 import threading
 from typing import List, Tuple, Any
-from rocketlib import IGlobalBase, debug, error
+from rocketlib import IGlobalBase, debug, error, warning
 from ai.common.config import Config, ConfigError
 
 from depends import depends
@@ -76,6 +76,30 @@ class ModelServerOCR(OCRInstance):
         self.languages = languages or ['en']
         self._ocr = None
         self._ocr_lock = threading.Lock()
+
+    def new_object(self) -> None:
+        """Start an object on the calling thread: its first OCR failure is logged at ERROR again."""
+        self._failures_logged().clear()
+
+    def _failures_logged(self) -> set:
+        """The failure kinds logged for the calling thread's current object.
+
+        Kept per thread: this object is shared by every instance of the node, and
+        instances working in parallel each have their own first failure.
+        """
+        local = self.__dict__.get('_failures')
+        if local is None:
+            local = self.__dict__.setdefault('_failures', threading.local())
+        logged = getattr(local, 'logged', None)
+        if logged is None:
+            logged = local.logged = set()
+        return logged
+
+    def _log_failure(self, kind: str, message: str) -> None:
+        """Log the first failure of a kind per object at ERROR and the later ones at WARNING."""
+        logged = self._failures_logged()
+        (warning if kind in logged else error)(message)
+        logged.add(kind)
 
     @property
     def ocr(self):
@@ -177,7 +201,7 @@ class ModelServerOCR(OCRInstance):
             import traceback
 
             # swallowed so a page failure cannot kill the whole document, but must stay visible
-            error(f'OCR content() failed: {e}\n{traceback.format_exc()}')
+            self._log_failure('content', f'OCR content() failed: {e}\n{traceback.format_exc()}')
 
         return all_results
 
@@ -218,7 +242,7 @@ class ModelServerOCR(OCRInstance):
         except Exception as e:
             import traceback
 
-            error(f'ModelServerOCR.of() error: {e}\n{traceback.format_exc()}')
+            self._log_failure('of', f'ModelServerOCR.of() error: {e}\n{traceback.format_exc()}')
             return None
 
         return OCRData(records=records) if records else None

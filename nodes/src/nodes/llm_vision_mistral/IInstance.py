@@ -36,6 +36,18 @@ class IInstance(LLMBase):
     # Raw image data
     image_data: bytearray = None
 
+    def open(self, obj):
+        """Start an object: its first inference failure is logged at ERROR again."""
+        self._failures_logged = set()
+
+    def _log_failure(self, kind: str, message: str) -> None:
+        """Log the first failure of a kind per object at ERROR and the later ones at WARNING."""
+        logged = getattr(self, '_failures_logged', None)
+        if logged is None:
+            logged = self._failures_logged = set()
+        (warning if kind in logged else error)(message)
+        logged.add(kind)
+
     def writeImage(self, action: int, mimeType: str, buffer: bytes):
         # Handle AVI_BEGIN action
         if action == AVI_ACTION.BEGIN:
@@ -104,7 +116,7 @@ class IInstance(LLMBase):
             try:
                 answer = self.IGlobal._chat.chat(question)
             except Exception as e:
-                error(f'Mistral Vision: inference failed for chunk {doc.metadata.chunkId}: {e}')
+                self._log_failure('chunk', f'Mistral Vision: inference failed for chunk {doc.metadata.chunkId}: {e}')
                 continue
 
             # Emit a text Doc preserving the original metadata (chunkId, time_stamp, etc.)

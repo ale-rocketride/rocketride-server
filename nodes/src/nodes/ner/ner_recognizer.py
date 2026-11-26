@@ -28,10 +28,11 @@ This module provides named entity recognition capabilities using the
 RocketRide model server's transformers pipeline support.
 """
 
+import threading
 from typing import Dict, Any, List
 from ai.common.config import Config
 from ai.common.models.transformers import pipeline
-from rocketlib import error
+from rocketlib import error, warning
 
 
 class NERRecognizer:
@@ -68,6 +69,30 @@ class NERRecognizer:
         print(f'[NER] Initialized with model: {self.model_name}')
         print(f'[NER] Aggregation strategy: {self.aggregation_strategy}')
         print(f'[NER] Minimum confidence: {self.min_confidence}')
+
+    def new_object(self) -> None:
+        """Start an object on the calling thread: its first entity extraction failure is logged at ERROR again."""
+        self._failures_logged().clear()
+
+    def _failures_logged(self) -> set:
+        """The failure kinds logged for the calling thread's current object.
+
+        Kept per thread: this object is shared by every instance of the node, and
+        instances working in parallel each have their own first failure.
+        """
+        local = self.__dict__.get('_failures')
+        if local is None:
+            local = self.__dict__.setdefault('_failures', threading.local())
+        logged = getattr(local, 'logged', None)
+        if logged is None:
+            logged = local.logged = set()
+        return logged
+
+    def _log_failure(self, kind: str, message: str) -> None:
+        """Log the first failure of a kind per object at ERROR and the later ones at WARNING."""
+        logged = self._failures_logged()
+        (warning if kind in logged else error)(message)
+        logged.add(kind)
 
     def extract_entities(self, text: str) -> List[Dict[str, Any]]:
         """
@@ -123,7 +148,7 @@ class NERRecognizer:
             return formatted_entities
 
         except Exception as e:
-            error(f'[NER] Error extracting entities: {str(e)}')
+            self._log_failure('extract', f'[NER] Error extracting entities: {str(e)}')
             return []
 
     def get_entity_summary(self, entities: List[Dict[str, Any]]) -> Dict[str, List[str]]:

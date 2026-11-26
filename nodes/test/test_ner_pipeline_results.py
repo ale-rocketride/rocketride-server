@@ -75,3 +75,29 @@ def test_empty_entities_remain_empty(recognizer):
 
     recognizer.ner_pipeline = stub_pipeline
     assert recognizer.extract_entities('nothing to recognize') == []
+
+
+def test_extraction_failures_first_error_then_warning(recognizer, monkeypatch):
+    """The first failed extraction of an object is an ERROR, the next ones WARNINGs; a new object starts again."""
+    # the recognizer module is loaded by file path, so patch its globals directly
+    module_globals = type(recognizer).extract_entities.__globals__
+    lines = []
+    monkeypatch.setitem(module_globals, 'error', lambda msg: lines.append(('ERROR', msg)))
+    monkeypatch.setitem(module_globals, 'warning', lambda msg: lines.append(('WARNING', msg)))
+
+    def failing_pipeline(inputs):
+        """Fail like an unreachable model server."""
+        raise ConnectionError('model server unreachable')
+
+    recognizer.ner_pipeline = failing_pipeline
+
+    recognizer.new_object()
+    assert recognizer.extract_entities('Alice') == []
+    assert recognizer.extract_entities('Bob') == []
+    assert [level for level, _ in lines] == ['ERROR', 'WARNING']
+    assert all(msg == '[NER] Error extracting entities: model server unreachable' for _, msg in lines)
+
+    lines.clear()
+    recognizer.new_object()
+    recognizer.extract_entities('Carol')
+    assert [level for level, _ in lines] == ['ERROR']

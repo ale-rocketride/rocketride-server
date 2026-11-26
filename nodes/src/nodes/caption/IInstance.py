@@ -22,7 +22,7 @@
 # SOFTWARE.
 # =============================================================================
 
-from rocketlib import IInstanceBase, AVI_ACTION, error
+from rocketlib import IInstanceBase, AVI_ACTION, error, warning
 from ai.common.image import ImageProcessor
 from .IGlobal import IGlobal
 
@@ -44,6 +44,18 @@ class IInstance(IInstanceBase):
         """Initialize per-instance image-accumulation state."""
         super().__init__(*args, **kwargs)
         self._image_data = None
+
+    def open(self, obj):
+        """Start an object: its first inference failure is logged at ERROR again."""
+        self._failures_logged = set()
+
+    def _log_failure(self, kind: str, message: str) -> None:
+        """Log the first failure of a kind per object at ERROR and the later ones at WARNING."""
+        logged = getattr(self, '_failures_logged', None)
+        if logged is None:
+            logged = self._failures_logged = set()
+        (warning if kind in logged else error)(message)
+        logged.add(kind)
 
     def _emit(self, image):
         """Caption one image and write the result to the text lane.
@@ -76,7 +88,7 @@ class IInstance(IInstanceBase):
                 image = ImageProcessor.load_image_from_bytes(self._image_data)
                 self._emit(image)
             except Exception as e:
-                error(f'caption: inference failed, passing empty: {e}')
+                self._log_failure('frame', f'caption: inference failed, passing empty: {e}')
                 if self.instance.hasListener('text'):
                     self.instance.writeText('')
             self._image_data = None

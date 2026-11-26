@@ -37,6 +37,10 @@ class IInstance(IInstanceBase):
 
     def open(self, object: Entry):
         self.image_data = b''  # Reset image data when a new object is opened
+        # The object's first table OCR failure is logged at ERROR, the rest at WARNING
+        table_ocr = getattr(self.IGlobal, 'table_ocr', None)
+        if table_ocr is not None:
+            table_ocr.new_object()
 
     def extract_tables_from_image(self, image_data: bytes, table_callback=None):
         """
