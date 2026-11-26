@@ -65,7 +65,7 @@ def classify_run_outcome(stop_requested: bool, stop_reason: Optional[str], exit_
 # Engine error codes that mean "this pipeline or its configuration is invalid":
 # the user's to fix, never the platform's (engine-lib/apLib/error/Ec.h). Raised by
 # the engine's own validation (InvalidSchema: a node that does not exist,
-# InvalidParam: e.g. an unknown lane) and by nodes through ai.common.config.require_config.
+# InvalidParam: e.g. an unknown lane) and by nodes raising ConfigError (rocketlib).
 VALIDATION_ERROR_CODES = frozenset(
     {'InvalidSchema', 'InvalidParam', 'InvalidName', 'InvalidSelection', 'InvalidSyntax', 'InvalidFormat'}
 )

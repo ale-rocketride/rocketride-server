@@ -23,7 +23,7 @@ import os
 import threading
 from typing import Any, Coroutine
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from ai.common.utils import config_int
 from rocketlib import IGlobalBase, OPEN_MODE, debug, error, warning
 
@@ -80,7 +80,7 @@ class IGlobal(IGlobalBase):
                 'laserdata: connection_string is required — set it in node config or the '
                 'LASER_CONNECTION_STRING env var (user:password@host:port)'
             )
-            raise ValueError('laserdata: connection_string is required')
+            raise ConfigError('laserdata: connection_string is required')
         self.connection_string = connection_string
 
         # The Iggy stream the memory topics live in; the SDK requires a default

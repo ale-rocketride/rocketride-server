@@ -27,7 +27,7 @@ Kimi (Moonshot) binding for the ChatLLM.
 
 from typing import Any, Dict
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from langchain_openai import ChatOpenAI
 
 
@@ -55,14 +55,14 @@ class Chat(ChatBase):
         # Get the serverbase url
         serverbase = config.get('serverbase')
         if not serverbase:
-            raise ValueError('Kimi (Moonshot) serverbase is required.')
+            raise ConfigError('Kimi (Moonshot) serverbase is required.')
 
         # Get the api key, use some dummy key if not provided
         apikey = config.get('apikey') or 'sk-local-dummy-key'
 
         # API key validation logic, only if it's a cloud model, locals do not have the apikey property
         if 'api.moonshot' in serverbase and not apikey.startswith('sk-'):
-            raise ValueError('Invalid Kimi (Moonshot) API key format, please check your API key.')
+            raise ConfigError('Invalid Kimi (Moonshot) API key format, please check your API key.')
 
         # Kimi K2 reasoning models reject any temperature other than 1
         # ("invalid temperature: only 1 is allowed for this model"). The classic

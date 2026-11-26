@@ -85,6 +85,7 @@ def _ensure_ai_common() -> None:
             return {}
 
     sys.modules['ai.common.config'].Config = _Config
+    sys.modules['ai.common.config'].ConfigError = type('ConfigError', (ValueError,), {})
 
 
 def _ensure_requests() -> None:

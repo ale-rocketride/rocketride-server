@@ -95,7 +95,7 @@ def _install_min_stubs() -> None:
     ai_common.__path__ = []
     sys.modules['ai.common'] = ai_common
 
-    _mk('ai.common.config', Config=_Config)
+    _mk('ai.common.config', Config=_Config, ConfigError=type('ConfigError', (ValueError,), {}))
     _mk('ai.common.opencv', cv2=object())
     _mk('depends', depends=_noop)
 

@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import re
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from ai.common.utils import decode_data_url
 from rocketlib import IGlobalBase, OPEN_MODE, warning
 
@@ -66,7 +66,7 @@ def _decode_pem_blob(value: str) -> str:
         raw, _mime = decode_data_url(value)
         return raw.decode('utf-8')
     except (ValueError, UnicodeDecodeError) as exc:
-        raise ValueError(f'tool_github: invalid GitHub App private key upload: {exc}') from exc
+        raise ConfigError(f'tool_github: invalid GitHub App private key upload: {exc}') from exc
 
 
 def _read_auth(cfg) -> dict:
@@ -84,7 +84,7 @@ def _read_auth(cfg) -> dict:
     if auth_type not in AUTH_TYPES:
         # Repeated back only when it is a plain name: the engine splits error text on '*'.
         shown = f' {auth_type!r}' if _IDENTIFIER_RE.fullmatch(auth_type) else ''
-        raise ValueError(f'tool_github: unknown authType{shown}; expected "pat" or "app"')
+        raise ConfigError(f'tool_github: unknown authType{shown}; expected "pat" or "app"')
 
     credential_map = _read_credential_map(cfg.get('credentialMap'))
     if credential_map is None:
@@ -94,7 +94,7 @@ def _read_auth(cfg) -> dict:
         return {'authType': auth_type, 'credentialMap': credential_map}
     if credential_map.has_default:
         fields = ', '.join(given)
-        raise ValueError(
+        raise ConfigError(
             f'tool_github: credentialMap has a default entry and the node has its own credential ({fields}); '
             f'remove one of them: the default entry from credentialMap, or {fields} from the node settings'
         )
@@ -106,11 +106,11 @@ def _read_node_credential(cfg, auth_type: str) -> dict:
     if auth_type == 'pat':
         token = str(cfg.get('token') or '').strip()
         if not token:
-            raise ValueError('tool_github: token is required')
+            raise ConfigError('tool_github: token is required')
         # A line break inside a token would be refused by requests with the header value in
         # its error text; refuse it here, without the value.
         if any(char.isspace() for char in token):
-            raise ValueError('tool_github: token must not contain spaces or line breaks')
+            raise ConfigError('tool_github: token must not contain spaces or line breaks')
         return {'authType': 'pat', 'token': token}
 
     return {'authType': 'app', **_read_app(cfg.get('appId'), cfg.get('privateKey'), cfg.get('installationId'))}
@@ -128,15 +128,15 @@ def _read_app(app_id, private_key, installation_id) -> dict:
     installation_id = _text(installation_id)
     missing = [name for name, value in (('App ID', app_id), ('private key', private_key_pem)) if not value]
     if missing:
-        raise ValueError(f'tool_github: {", ".join(missing)} required for GitHub App auth')
+        raise ConfigError(f'tool_github: {", ".join(missing)} required for GitHub App auth')
     # GitHub also accepts a client ID as the JWT issuer, so retain nonnumeric IDs.
     if re.fullmatch(r'[+-]?[0-9]+', app_id) and int(app_id) <= 0:
-        raise ValueError('tool_github: numeric App ID must be greater than zero for GitHub App auth')
+        raise ConfigError('tool_github: numeric App ID must be greater than zero for GitHub App auth')
     # The installation ID is a path segment of the token URL; only ASCII digits may reach it.
     if installation_id and not _INSTALLATION_ID_RE.fullmatch(installation_id):
-        raise ValueError('tool_github: installation ID must be numeric for GitHub App auth')
+        raise ConfigError('tool_github: installation ID must be numeric for GitHub App auth')
     if installation_id and int(installation_id) <= 0:
-        raise ValueError('tool_github: installation ID must be greater than zero for GitHub App auth')
+        raise ConfigError('tool_github: installation ID must be greater than zero for GitHub App auth')
     # Parse the PEM now so a malformed key surfaces at pipeline open, not on the first tool call.
     github_client.load_app_private_key(private_key_pem)
     return {
@@ -167,24 +167,24 @@ def _check_filled(where: str, value: str, *, in_text: bool = False) -> None:
     if found is not None:
         name = '${' + found.group(1) + '}'
         if in_text:
-            raise ValueError(
+            raise ConfigError(
                 f'tool_github: {where} still holds the placeholder {name}. Placeholders inside a credentialMap '
                 'given as JSON text (one variable that holds the whole map) are not resolved, because the '
                 "variable's own text is not scanned again; put literal values in that variable, or write the "
                 'map as an object in the pipeline to use a placeholder per value'
             )
         how = 'is set to' if found.group(0) == value.strip() else 'uses the placeholder'
-        raise ValueError(
+        raise ConfigError(
             f'tool_github: {where} {how} {name}, but no variable of that name was found. Add it to '
             'the org, team or user environment variables; in a user-owned run your own variables apply'
         )
     if '${' in value:
-        raise ValueError(
+        raise ConfigError(
             f'tool_github: {where} has a "${{" that does not start a complete ${{ROCKETRIDE_<name>}} placeholder '
             '(only ROCKETRIDE_ variables resolve); check the braces and the variable name'
         )
     if '<REDACTED>' in value:
-        raise ValueError(
+        raise ConfigError(
             f'tool_github: {where} uses a variable whose name does not start with ROCKETRIDE_; '
             'only ROCKETRIDE_<name> variables resolve in a pipeline'
         )
@@ -215,13 +215,13 @@ def _read_credential_map(raw):
             # strict=False: a PEM's line breaks may stand in a string as they are.
             raw = json.loads(text, strict=False)
         except json.JSONDecodeError as exc:
-            raise ValueError(
+            raise ConfigError(
                 f'tool_github: credentialMap is not valid JSON (line {exc.lineno}, column {exc.colno})'
             ) from None
     if isinstance(raw, list):
         raw = _rows_to_map(raw)
     if not isinstance(raw, dict):
-        raise ValueError(
+        raise ConfigError(
             'tool_github: credentialMap must be a list of rows (credentialRepository and credentialValue) or a '
             'JSON object that maps repositories, owners or the default entry to credentials'
         )
@@ -230,12 +230,12 @@ def _read_credential_map(raw):
         pattern = credentials.map_key(key)
         if pattern is None:
             # By position: a value pasted where its key belongs must not be echoed.
-            raise ValueError(
+            raise ConfigError(
                 f'tool_github: credentialMap key {position} is not a repository (owner/repo), an owner entry '
                 '(the owner, a slash and an asterisk) or the default entry (a single asterisk)'
             )
         if pattern in entries:
-            raise ValueError(f'tool_github: {_entry_name(pattern)} appears twice (keys are not case sensitive)')
+            raise ConfigError(f'tool_github: {_entry_name(pattern)} appears twice (keys are not case sensitive)')
         entries[pattern] = _map_credential(_entry_name(pattern), value, in_text=in_text)
     return credentials.CredentialMap(entries) if entries else None
 
@@ -248,22 +248,22 @@ def _rows_to_map(rows: list) -> dict:
     entries: dict = {}
     for position, row in enumerate(rows, 1):
         if not isinstance(row, dict):
-            raise ValueError(
+            raise ConfigError(
                 f'tool_github: credentialMap row {position} must be an object with credentialRepository and credentialValue'
             )
         unknown = sum(1 for name in row if name not in _ROW_FIELDS)
         if unknown:
             # Counted, not named: a token pasted as a field name must not be printed.
-            raise ValueError(
+            raise ConfigError(
                 f'tool_github: credentialMap row {position} has {unknown} unknown field(s); only credentialRepository '
                 'and credentialValue are allowed'
             )
         key = row.get('credentialRepository')
         value = row.get('credentialValue')
         if key is not None and not isinstance(key, str):
-            raise ValueError(f'tool_github: credentialMap row {position}: credentialRepository must be text')
+            raise ConfigError(f'tool_github: credentialMap row {position}: credentialRepository must be text')
         if value is not None and not isinstance(value, (str, dict)):
-            raise ValueError(
+            raise ConfigError(
                 f'tool_github: credentialMap row {position}: credentialValue must be text or an App credential object'
             )
         key = (key or '').strip()
@@ -271,16 +271,16 @@ def _rows_to_map(rows: list) -> dict:
         if not key and blank:
             continue  # a row the form added and nobody filled
         if not key:
-            raise ValueError(f'tool_github: credentialMap row {position} has a credential but no repository')
+            raise ConfigError(f'tool_github: credentialMap row {position} has a credential but no repository')
         if blank:
-            raise ValueError(f'tool_github: credentialMap row {position} has no credential')
+            raise ConfigError(f'tool_github: credentialMap row {position} has no credential')
         if credentials.map_key(key) is None:
-            raise ValueError(
+            raise ConfigError(
                 f'tool_github: credentialMap row {position}: credentialRepository is not a repository (owner/repo), '
                 'an owner entry (the owner, a slash and an asterisk) or the default entry (a single asterisk)'
             )
         if key in entries:
-            raise ValueError(f'tool_github: credentialMap row {position} repeats the repository of an earlier row')
+            raise ConfigError(f'tool_github: credentialMap row {position} repeats the repository of an earlier row')
         entries[key] = value
     return entries
 
@@ -294,28 +294,28 @@ def _map_credential(where: str, value, *, in_text: bool = False):
             try:
                 value = json.loads(value, strict=False)
             except json.JSONDecodeError as exc:
-                raise ValueError(
+                raise ConfigError(
                     f'tool_github: {where} is not valid JSON (line {exc.lineno}, column {exc.colno})'
                 ) from None
             if not isinstance(value, dict):
-                raise ValueError(
+                raise ConfigError(
                     f'tool_github: {where} must be a token or the JSON text of an object with appId, '
                     'privateKey and an optional installationId'
                 )
             return _map_credential(where, value, in_text=in_text)
         token = value.strip()
         if not token or any(char.isspace() for char in token):
-            raise ValueError(f'tool_github: {where} must be a non-empty token without spaces or line breaks')
+            raise ConfigError(f'tool_github: {where} must be a non-empty token without spaces or line breaks')
         return credentials.PatCredential(token)
     if not isinstance(value, dict):
-        raise ValueError(
+        raise ConfigError(
             f'tool_github: {where} must be a token string or an object with appId, privateKey '
             'and an optional installationId'
         )
     unknown = sum(1 for name in value if name not in _APP_FIELDS)
     if unknown:
         # Counted, not named: a token pasted as a field name must not be printed.
-        raise ValueError(
+        raise ConfigError(
             f'tool_github: {where} has {unknown} unknown field(s); '
             'expected appId, privateKey and an optional installationId'
         )
@@ -327,13 +327,13 @@ def _map_credential(where: str, value, *, in_text: bool = False):
         allowed = (str,) if name == 'privateKey' else (str, int)
         if isinstance(field, bool) or not isinstance(field, allowed):
             kinds = 'a string' if name == 'privateKey' else 'a string or a number'
-            raise ValueError(f'tool_github: {where}: {name} must be {kinds}')
+            raise ConfigError(f'tool_github: {where}: {name} must be {kinds}')
         if isinstance(field, str):
             _check_filled(f'{where}: {name}', field, in_text=in_text)
     try:
         app = _read_app(value.get('appId'), value.get('privateKey'), value.get('installationId'))
     except ValueError as exc:
-        raise ValueError(f'tool_github: {where}: {str(exc).removeprefix("tool_github: ")}') from None
+        raise ConfigError(f'tool_github: {where}: {str(exc).removeprefix("tool_github: ")}') from None
     return credentials.AppCredential(app['appId'], app['privateKeyPem'], app['installationId'], app['rawKey'])
 
 
@@ -358,7 +358,7 @@ def _read_int(cfg, option: tuple) -> int:
     elif isinstance(raw, str) and raw.strip().isdecimal():
         value = int(raw.strip())
     if value is None or not minimum <= value <= maximum:
-        raise ValueError(f'tool_github: {key} must be an integer from {minimum} to {maximum}')
+        raise ConfigError(f'tool_github: {key} must be an integer from {minimum} to {maximum}')
     return value
 
 
@@ -371,7 +371,7 @@ def _read_flag(cfg, key: str, default: bool = False) -> bool:
         return raw
     if isinstance(raw, str) and raw.strip().lower() in ('true', 'false'):
         return raw.strip().lower() == 'true'
-    raise ValueError(f'tool_github: {key} must be true or false')
+    raise ConfigError(f'tool_github: {key} must be true or false')
 
 
 def _read_tools(raw) -> frozenset:
@@ -384,11 +384,11 @@ def _read_tools(raw) -> frozenset:
     if isinstance(raw, str):
         raw = raw.split(',')
     if not isinstance(raw, (list, tuple)) or not all(isinstance(name, str) for name in raw):
-        raise ValueError('tool_github: tools must be a list of tool names')
+        raise ConfigError('tool_github: tools must be a list of tool names')
     names = frozenset(name.strip() for name in raw if name.strip())
     if raw and not names:
         # Entries that are all blank are a mistake, not a request for every tool: fail closed.
-        raise ValueError(
+        raise ConfigError(
             'tool_github: tools has only blank entries; name the tools to publish, or leave tools empty to publish every tool'
         )
     return names
@@ -400,7 +400,7 @@ def _read_options(cfg) -> dict:
     try:
         credentials.check_scope(default_repo, None)
     except github_client.CredentialError:
-        raise ValueError('tool_github: defaultRepo must be a repository in owner/repo form') from None
+        raise ConfigError('tool_github: defaultRepo must be a repository in owner/repo form') from None
     return {
         'defaultRepo': default_repo,
         'tools': validate_tool_names(_read_tools(cfg.get('tools'))),

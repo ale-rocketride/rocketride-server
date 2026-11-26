@@ -28,7 +28,7 @@ from depends import depends  # type: ignore
 from typing import Any, Dict
 from ai.common.schema import Answer, Question
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import warning
 
 # Load requirements
@@ -58,9 +58,9 @@ class Chat(ChatBase):
         self._prompt = config.get('vision.prompt') or config.get('prompt') or 'Describe this image in detail.'
 
         if not api_key:
-            raise ValueError('Missing OpenAI API key. Get one at https://platform.openai.com/api-keys')
+            raise ConfigError('Missing OpenAI API key. Get one at https://platform.openai.com/api-keys')
         if not api_key.startswith('sk-'):
-            raise ValueError(
+            raise ConfigError(
                 'Invalid OpenAI API key format. Keys should start with "sk-". Please check your key at https://platform.openai.com/api-keys'
             )
 

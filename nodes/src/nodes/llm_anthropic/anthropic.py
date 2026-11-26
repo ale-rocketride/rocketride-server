@@ -31,7 +31,7 @@ Extended-thinking streaming is handled globally via
 from typing import Any, Dict
 
 from ai.common.chat import ChatBase
-from ai.common.config import Config, check_credential_resolved
+from ai.common.config import Config, ConfigError, check_credential_resolved
 from ai.common.llm_native_stream import (
     PROMPT_CACHE_PREFIX_VAR,
     apply_prompt_cache_breakpoint,
@@ -91,7 +91,7 @@ class Chat(ChatBase):
         # API key validation: must be non-empty and look like an Anthropic key
         # Formats: sk-ant-... (standard), sk-ant-api03-... (newer keys)
         if not apikey or not apikey.startswith('sk-ant'):
-            raise ValueError('Invalid Anthropic API key format, please check your API key.')
+            raise ConfigError('Invalid Anthropic API key format, please check your API key.')
 
         # Init the chat base
         super().__init__(provider, connConfig, bag)

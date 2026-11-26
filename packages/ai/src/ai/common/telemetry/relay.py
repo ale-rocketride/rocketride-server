@@ -300,8 +300,6 @@ def _raised(scope: _Scope, error: BaseException) -> None:
         from . import _deps
 
         cls = type(error).__name__
-        if cls == 'APERR' and error.__cause__ is not None:
-            cls = type(error.__cause__).__name__  # a config error the engine reports as APERR
         record = {
             'k': 'exc',
             'x': cls[:64],

@@ -107,6 +107,7 @@ def _load_config():
 
     rl = types.ModuleType('rocketlib')
     rl.IJson = _FakeIJson
+    rl.ConfigError = type('ConfigError', (ValueError,), {})
     rl.warning = lambda *a, **k: None
     rl.getServiceDefinition = lambda logical_type: _SERVICE
     sys.modules['rocketlib'] = rl

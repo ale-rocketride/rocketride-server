@@ -22,7 +22,7 @@
 # =============================================================================
 
 from typing import Any, Dict
-from rocketlib import IGlobalBase, OPEN_MODE, warning
+from rocketlib import ConfigError, IGlobalBase, OPEN_MODE, warning
 
 # The key a result sums its text and JSON answers' token counts under. A plain string entry has no
 # room for them, and a turn entry carries its own. Not a lane: never in result_types, so chat-ui,
@@ -94,7 +94,7 @@ class IGlobal(IGlobalBase):
         message = _reserved_key_error(config)
         # Opened only to be configured, the node must still start; validateConfig reports the key there
         if message and self.IEndpoint.endpoint.openMode != OPEN_MODE.CONFIG:
-            raise ValueError(message)
+            raise ConfigError(message)
 
         # This will create a local copy
         self.laneName, self.lanes = _configured_keys(config)

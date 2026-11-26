@@ -123,6 +123,11 @@ class APERR(Exception):
     @staticmethod
     def fromDict(data: Dict[str, str]) -> 'APERR': ...
 
+class ConfigError(APERR, ValueError):
+    """Raised by a node whose configuration is invalid (Ec.InvalidParam)."""
+
+    def __init__(self, message: str) -> None: ...
+
 # ---- types.py ----
 
 class PROTOCOL_CAPS:

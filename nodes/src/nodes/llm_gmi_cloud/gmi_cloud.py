@@ -26,7 +26,7 @@
 from typing import Any, Dict
 from openai import AuthenticationError, APIError, RateLimitError, APIConnectionError
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from langchain_openai import ChatOpenAI
 
 
@@ -49,7 +49,7 @@ class Chat(ChatBase):
 
         serverbase = config.get('serverbase')
         if not serverbase:
-            raise ValueError('GMI Cloud serverbase is required.')
+            raise ConfigError('GMI Cloud serverbase is required.')
 
         # Use a dummy key placeholder so the LLM client initialises without
         # crashing when the user has not yet saved a valid API key.

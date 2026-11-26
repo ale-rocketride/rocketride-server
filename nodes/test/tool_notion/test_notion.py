@@ -66,6 +66,7 @@ def _load_modules():
 
     ai_cfg = types.ModuleType('ai.common.config')
     ai_cfg.Config = type('Config', (), {'getNodeConfig': staticmethod(lambda *a, **k: {})})
+    ai_cfg.ConfigError = type('ConfigError', (ValueError,), {})
     sys.modules['ai.common.config'] = ai_cfg
 
     ai_utils = types.ModuleType('ai.common.utils')

@@ -5,7 +5,7 @@ import sys
 import os
 import difflib
 from typing import Dict, Any, Optional
-from rocketlib import getServiceDefinition, IJson, warning
+from rocketlib import ConfigError, getServiceDefinition, IJson, warning
 
 # Token limits. Several pipeline shapes can hold them (see getNodeConfig), and a
 # value written in two places with two values is worth a warning.
@@ -16,59 +16,6 @@ _LIMIT_FIELDS = ('modelTotalTokens', 'modelOutputTokens')
 _UNRESOLVED_PLACEHOLDER = re.compile(r'\$\{([^}]*)\}')
 # What resolve_pipeline_env writes for a ${NAME} outside the ROCKETRIDE_* namespace.
 _REDACTED_PLACEHOLDER = '<REDACTED>'
-
-
-class ConfigError(ValueError):
-    """
-    A node's configuration is invalid: the user's to fix, not a platform failure.
-
-    The engine reports it with Ec.InvalidParam, so a run that stops on it before
-    it starts is a refused pipeline ('start_rejected', ai.modules.task.run_outcome),
-    not a start failure. Raise it (or call require_config) only for a problem found
-    without calling anything: a missing or unfilled credential, an invalid setting.
-    A provider that rejects a key or does not answer is not one. A ValueError, so
-    existing handlers still catch it.
-    """
-
-    def __init__(self, message: str):
-        """Record the message and where it was raised, in the form the engine reads."""
-        super().__init__(message)
-        # Where it was raised: skip only this exception's own constructors and
-        # require_config (which reports its caller); a node validating in its
-        # own __init__ is reported there
-        frame = sys._getframe(1)
-        while frame is not None and (
-            frame.f_code is require_config.__code__
-            or (frame.f_code.co_name == '__init__' and frame.f_locals.get('self') is self)
-        ):
-            frame = frame.f_back
-        self.message = message
-        try:
-            from rocketlib import Ec
-        except ImportError:  # no engine (a test's rocketlib stub): a plain ValueError
-            return
-        # The engine's exception translator (engLib/python/call.hpp) keeps the
-        # code of an exception that carries these attributes
-        setattr(self, '__formatted', True)
-        self.code = int(Ec.InvalidParam)
-        self.filename = frame.f_code.co_filename if frame else '<unknown>'
-        self.function = frame.f_code.co_name if frame else '<unknown>'
-        self.line = frame.f_lineno if frame else -1
-
-
-def require_config(condition: Any, message: str) -> None:
-    """
-    Refuse a node configuration the user must fix (see ConfigError).
-
-    Args:
-        condition: Anything truthy passes.
-        message: What is wrong and how to fix it, shown to the user.
-
-    Raises:
-        ConfigError: condition is falsy.
-    """
-    if not condition:
-        raise ConfigError(message)
 
 
 class UnresolvedCredentialError(ConfigError):

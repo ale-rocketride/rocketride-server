@@ -28,7 +28,7 @@ MiniMax binding for the ChatLLM.
 import re
 from typing import Any, Dict
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from ai.common.llm_adapter import report_usage_metadata
 from langchain_openai import ChatOpenAI
 
@@ -72,7 +72,7 @@ class Chat(ChatBase):
         # API key is only required when calling MiniMax's cloud API. Matches both
         # api.minimax.io (international) and api.minimaxi.com (China) by substring.
         if 'api.minimax' in serverbase and apikey == 'sk-local-dummy-key':
-            raise ValueError('MiniMax API key is required for cloud profiles.')
+            raise ConfigError('MiniMax API key is required for cloud profiles.')
 
         # Get the llm via the OpenAI-compatible client
         self._llm = ChatOpenAI(

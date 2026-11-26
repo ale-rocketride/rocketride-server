@@ -52,6 +52,7 @@ def _install_stubs() -> None:
     ai_common = types.ModuleType('ai.common')
     ai_common_config = types.ModuleType('ai.common.config')
     ai_common_config.Config = type('Config', (), {})
+    ai_common_config.ConfigError = type('ConfigError', (ValueError,), {})
     ai.common = ai_common
     ai_common.config = ai_common_config
     sys.modules['ai'] = ai

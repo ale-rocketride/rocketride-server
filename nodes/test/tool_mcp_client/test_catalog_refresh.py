@@ -57,6 +57,8 @@ def _ensure_iglobal_import_stubs():
                 return {}
 
         sys.modules['ai.common.config'].Config = _Config
+    if not hasattr(sys.modules['ai.common.config'], 'ConfigError'):
+        sys.modules['ai.common.config'].ConfigError = type('ConfigError', (ValueError,), {})
 
     if 'tool_mcp_client' not in sys.modules:
         package = types.ModuleType('tool_mcp_client')

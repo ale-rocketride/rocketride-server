@@ -13,7 +13,7 @@ settings from node config. The three instance tools reuse this state.
 from __future__ import annotations
 
 import os
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import IGlobalBase, OPEN_MODE, error, warning
 
 # Defaults / bounds (avoid magic constants scattered in the code).
@@ -62,7 +62,7 @@ class IGlobal(IGlobalBase):
         base_url = str(cfg.get('base_url') or _DEFAULT_BASE_URL).strip().rstrip('/')
         if not base_url:
             error('cognee: base_url is required — set the cognee server URL in node config')
-            raise ValueError('cognee: base_url is required')
+            raise ConfigError('cognee: base_url is required')
         self.base_url = base_url
 
         # Optional: cognee self-hosted with access control off needs no key.

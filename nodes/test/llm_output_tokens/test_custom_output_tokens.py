@@ -132,6 +132,7 @@ def _real_get_node_config(service: dict, warnings: list | None = None):
     rocketlib = types.ModuleType('rocketlib')
     rocketlib.getServiceDefinition = lambda logicalType: service
     rocketlib.IJson = FakeIJson
+    rocketlib.ConfigError = type('ConfigError', (ValueError,), {})
     rocketlib.warning = warnings.append if warnings is not None else (lambda *a, **kw: None)
     stubs = {'rocketlib': rocketlib}
     if importlib.util.find_spec('json5') is None:

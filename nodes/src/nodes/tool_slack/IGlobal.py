@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import os
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import IGlobalBase, OPEN_MODE, warning
 
 # Pipeline env vars must be ROCKETRIDE_-prefixed (only those are substituted,
@@ -99,7 +99,7 @@ class IGlobal(IGlobalBase):
                 self.IEndpoint.endpoint.bag,
             )
         except ValueError as e:
-            raise ValueError(f'tool_slack: {e}') from e
+            raise ConfigError(f'tool_slack: {e}') from e
 
     def validateConfig(self) -> None:
         """Check config presence/format ONLY — never makes a live API call."""

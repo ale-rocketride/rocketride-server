@@ -84,6 +84,7 @@ def _load_get_node_config(service):
     rocketlib = types.ModuleType('rocketlib')
     rocketlib.getServiceDefinition = lambda logicalType: service
     rocketlib.IJson = FakeIJson
+    rocketlib.ConfigError = type('ConfigError', (ValueError,), {})
     rocketlib.warning = lambda *a, **kw: None
 
     stubs = {'rocketlib': rocketlib}

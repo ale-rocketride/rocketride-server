@@ -292,66 +292,6 @@ class IFilterGlobal(IServiceGlobal, Protocol):
     physicalType: str
 
 
-# A rejected configuration as both: an APERR the engine reads (its C++ host
-# matches the type name APERR and takes .ec, InvalidParam) and still a ValueError
-# for Python callers (a node or a test that catches one keeps working)
-# reads as the node's own message, as the ValueError did
-ConfigRejected = type(
-    'APERR',
-    (APERR, ValueError),
-    {'__doc__': 'A node rejected its configuration (InvalidParam).', '__str__': lambda self: self.msg},
-)
-
-
-# Exception class names of provider SDKs' transport failures that are not OSErrors
-# (openai.APIConnectionError, APITimeoutError, InternalServerError, ServiceUnavailableError...)
-_TRANSPORT_NAMES = ('Timeout', 'Connection', 'Unavailable', 'ServerError', 'Overloaded')
-
-
-def _provider_failure(error: BaseException) -> bool:
-    """Whether a ValueError was raised from a provider's or the network's failure (its cause chain)."""
-    seen = 0
-    link = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
-    while link is not None and seen < 10:
-        seen += 1
-        if isinstance(link, (OSError, TimeoutError)):
-            return True  # a refused or reset connection, DNS, a timeout
-        status = getattr(link, 'status_code', None) or getattr(link, 'status', None)
-        if isinstance(status, int) and (status >= 500 or status == 408):
-            return True
-        if any(name in type(link).__name__ for name in _TRANSPORT_NAMES):
-            return True
-        link = link.__cause__ or (None if link.__suppress_context__ else link.__context__)
-    return False
-
-
-def _config_errors(method: Callable) -> Callable:
-    """
-    A node's start (validateConfig, beginGlobal) as the engine calls it: a plain
-    ValueError is how nodes reject their configuration (a missing or malformed
-    key, a bad option), so it leaves as ConfigRejected (InvalidParam), which the
-    run's outcome reads as a configuration the engine refused (the customer's),
-    not a platform failure. Its subclasses are not (a JSONDecodeError, a
-    UnicodeDecodeError, a validation error on a response: a provider's or our
-    own failure) and leave as they are; nor is a ValueError raised while handling
-    a provider's or the network's failure (a driver mapping a 5xx, a timeout or a
-    refused connection to ValueError, _provider_failure): that is a start error.
-    """
-
-    @functools.wraps(method)
-    def start(self, *args, **kwargs):
-        try:
-            return method(self, *args, **kwargs)
-        except ValueError as e:
-            if type(e) is not ValueError or _provider_failure(e):
-                raise
-            # the original traceback: the error's location stays the node's line, not this one
-            raise ConfigRejected(Ec.InvalidParam, str(e)).with_traceback(e.__traceback__) from e
-
-    start._config_errors = True
-    return start
-
-
 class IGlobalBase:
     """
     Base class for all IGlobals.
@@ -359,20 +299,6 @@ class IGlobalBase:
     These calls may all be overridden in derived
     classes. The engine will call these functions.
     """
-
-    # The methods through which a node accepts or refuses its configuration
-    _CONFIG_METHODS = ('validateConfig', 'beginGlobal')
-
-    def __init_subclass__(cls, **kwargs):
-        """Every node's validateConfig and beginGlobal report a ValueError as InvalidParam (_config_errors)."""
-        super().__init_subclass__(**kwargs)
-        for name in cls._CONFIG_METHODS:
-            method = cls.__dict__.get(name)
-            # an instance method only (a static or class method has no instance to count on)
-            if isinstance(method, (staticmethod, classmethod)):
-                continue
-            if callable(method) and not getattr(method, '_config_errors', False):
-                setattr(cls, name, _config_errors(method))
 
     IEndpoint: IEndpointBase = None
     glb: IFilterGlobal = None

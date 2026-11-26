@@ -26,7 +26,7 @@
 # ------------------------------------------------------------------------------
 import os
 from rocketlib import IGlobalBase, OPEN_MODE, warning
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 
 from .hybrid_search import HybridSearchEngine
 
@@ -68,9 +68,9 @@ class IGlobal(IGlobalBase):
             # profile surfaces at config load time instead of silently producing
             # empty result slices (top_k <= 0) or runtime divide errors (rrf_k < 0).
             if self.top_k < 1:
-                raise ValueError(f'search_hybrid: top_k must be >= 1 (got {self.top_k})')
+                raise ConfigError(f'search_hybrid: top_k must be >= 1 (got {self.top_k})')
             if self.rrf_k < 0:
-                raise ValueError(f'search_hybrid: rrf_k must be >= 0 (got {self.rrf_k})')
+                raise ConfigError(f'search_hybrid: rrf_k must be >= 0 (got {self.rrf_k})')
 
             # Validate alpha range — clamp to [0, 1] but warn loudly so a
             # misconfigured profile is visible in the logs instead of being

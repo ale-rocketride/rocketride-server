@@ -33,7 +33,7 @@ import os
 import re
 from typing import Any, Dict
 
-from ai.common.config import Config, check_credential_resolved, warn_if_credential_unresolved
+from ai.common.config import Config, ConfigError, check_credential_resolved, warn_if_credential_unresolved
 from ai.common.transform import IGlobalTransform
 from rocketlib import OPEN_MODE, debug, warning
 
@@ -76,7 +76,7 @@ def _parse_mode_opensearch(mode_raw: str) -> str:
         return MODE_INDEX
     if mode in ('true', 'vstore'):
         return MODE_VSTORE
-    raise ValueError(f'Invalid mode: {mode_raw}')
+    raise ConfigError(f'Invalid mode: {mode_raw}')
 
 
 def _parse_mode_elasticsearch(mode_raw: Any) -> str:

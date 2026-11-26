@@ -23,7 +23,7 @@
 
 import threading
 from rocketlib import IGlobalBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 
 
 class IGlobal(IGlobalBase):
@@ -47,7 +47,7 @@ class IGlobal(IGlobalBase):
         interval = self.config.get('interval')
         if interval is not None:
             if interval <= 0:
-                raise ValueError(f'interval must be positive, got {interval}')
+                raise ConfigError(f'interval must be positive, got {interval}')
             self.config['fps'] = 1.0 / interval
 
     def endGlobal(self):

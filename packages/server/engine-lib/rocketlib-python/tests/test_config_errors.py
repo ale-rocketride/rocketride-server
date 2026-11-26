@@ -1,23 +1,43 @@
-"""A node that rejects its configuration with a ValueError reports InvalidParam: the customer's, not a platform failure."""
+"""A node reports an invalid configuration with ConfigError (InvalidParam); any other error is left as it is."""
+
+import pickle
 
 import pytest
 
 rocketlib = pytest.importorskip('rocketlib')
 
-from rocketlib import APERR, Ec, IGlobalBase  # noqa: E402
+from rocketlib import APERR, ConfigError, Ec, IGlobalBase  # noqa: E402
 
 
-class _Base(IGlobalBase):
+def test_config_error_is_an_invalid_param_aperr_and_a_value_error():
+    error = ConfigError('missing apikey')
+    assert isinstance(error, APERR)
+    assert isinstance(error, ValueError)
+    assert error.ec == Ec.InvalidParam
+    assert error.msg == 'missing apikey'
+    assert str(error) == 'missing apikey'
+    assert error.args == ('missing apikey',)
+
+
+def test_existing_value_error_handlers_still_catch_it():
+    with pytest.raises(ValueError, match='missing apikey'):
+        raise ConfigError('missing apikey')
+
+
+def test_config_error_survives_pickling():
+    error = pickle.loads(pickle.dumps(ConfigError('bad setting')))
+    assert type(error) is ConfigError
+    assert error.ec == Ec.InvalidParam and str(error) == 'bad setting'
+
+
+class _Rejects(IGlobalBase):
     def beginGlobal(self):
-        raise ValueError('Invalid Anthropic API key format, please check your API key.')
+        raise ConfigError('Invalid Anthropic API key format, please check your API key.')
 
 
-class _Node(_Base):
+class _Breaks(IGlobalBase):
     def beginGlobal(self):
-        try:
-            super().beginGlobal()
-        except ValueError:
-            self.recovered = True  # a node handling its base class's ValueError still gets one
+        int('x')  # a plain ValueError: a bug, not the customer's configuration
 
 
 class _Validates(IGlobalBase):
@@ -25,114 +45,20 @@ class _Validates(IGlobalBase):
         raise ValueError('missing apikey')
 
 
-class _Breaks(IGlobalBase):
-    def beginGlobal(self):
-        raise KeyError('ours')
-
-
-def test_a_rejected_configuration_is_still_a_value_error_for_python_callers():
-    with pytest.raises(ValueError, match='Invalid Anthropic API key format'):
-        _Base().beginGlobal()
-
-
-def test_a_rejected_configuration_leaves_as_invalid_param():
+def test_a_node_raising_config_error_reports_invalid_param():
     with pytest.raises(APERR) as caught:
-        _Base().beginGlobal()
-    assert caught.value.ec == Ec.InvalidParam
-    assert 'Invalid Anthropic API key format' in str(caught.value)
-    with pytest.raises(APERR) as caught:
-        _Validates().validateConfig()
+        _Rejects().beginGlobal()
     assert caught.value.ec == Ec.InvalidParam
 
 
-def test_a_value_error_caught_inside_the_node_stays_a_value_error():
-    node = _Node()
-    node.beginGlobal()
-    assert node.recovered
-
-
-def test_any_other_error_is_left_as_it_is():
-    with pytest.raises(KeyError):
-        _Breaks().beginGlobal()
-
-
-class _Parses(IGlobalBase):
-    def beginGlobal(self):
-        import json
-
-        json.loads('not json')  # a JSONDecodeError (a ValueError subclass): not a configuration
-
-
-class _Inherits(_Base):
-    pass  # no beginGlobal of its own: the base class's, already reporting
-
-
-class _Grandchild(_Node):
-    def beginGlobal(self):
-        super().beginGlobal()
-
-
-class _Static(IGlobalBase):
-    @staticmethod
-    def validateConfig():
-        raise ValueError('a static method is left alone')
-
-
-def test_a_value_error_subclass_is_ours_not_a_configuration():
-    import json
-
-    with pytest.raises(json.JSONDecodeError):
-        _Parses().beginGlobal()
-
-
-def test_an_inherited_start_reports_too():
-    with pytest.raises(APERR) as caught:
-        _Inherits().beginGlobal()
-    assert caught.value.ec == Ec.InvalidParam
-
-
-def test_a_grandchild_through_super_keeps_the_inner_handling():
-    node = _Grandchild()
-    node.beginGlobal()
-    assert node.recovered
-
-
-def test_static_methods_are_not_wrapped():
-    with pytest.raises(ValueError):
-        _Static.validateConfig()
-
-
-def test_a_value_error_mapped_from_a_provider_failure_is_not_a_configuration():
-    """A driver turns a 503 or a timeout at start into ValueError: a start error, not the customer's config."""
-    from rocketlib.filters import _config_errors
-
-    class Unavailable(Exception):
-        status_code = 503
-
-    class APITimeoutError(Exception):
-        pass
-
-    for failure in (Unavailable('busy'), APITimeoutError('slow'), ConnectionRefusedError('no route')):
-
-        def begin(self, failure=failure):
-            try:
-                raise failure
-            except Exception:
-                raise ValueError('Could not validate the key')
-
+def test_a_plain_value_error_is_not_turned_into_invalid_param():
+    for call in (_Breaks().beginGlobal, _Validates().validateConfig):
         with pytest.raises(ValueError) as caught:
-            _config_errors(begin)(object())
-        assert type(caught.value) is ValueError  # left as is: not InvalidParam
+            call()
+        assert type(caught.value) is ValueError
+        assert not isinstance(caught.value, APERR)
 
-    class Unauthorized(Exception):
-        status_code = 401
 
-    def bad_key(self):
-        try:
-            raise Unauthorized('invalid key')
-        except Exception:
-            raise ValueError('Invalid API key')
-
-    with pytest.raises(ValueError) as caught:
-        _config_errors(bad_key)(object())
-    assert type(caught.value).__name__ == 'APERR'  # a rejected key is the configuration
+def test_the_start_methods_are_not_wrapped():
+    assert _Breaks.__dict__['beginGlobal'].__name__ == 'beginGlobal'
+    assert not hasattr(_Breaks.beginGlobal, '__wrapped__')

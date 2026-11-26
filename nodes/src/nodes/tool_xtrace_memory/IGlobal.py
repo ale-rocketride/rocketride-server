@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from typing import List
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import IGlobalBase, OPEN_MODE, error, warning
 
 
@@ -62,10 +62,10 @@ class IGlobal(IGlobalBase):
 
         if not api_key:
             error('xtrace_memory: api_key is required — set it in node config or the XTRACE_API_KEY env var')
-            raise ValueError('xtrace_memory: api_key is required')
+            raise ConfigError('xtrace_memory: api_key is required')
         if not org_id:
             error('xtrace_memory: org_id is required — set it in node config or the XTRACE_ORG_ID env var')
-            raise ValueError('xtrace_memory: org_id is required')
+            raise ConfigError('xtrace_memory: org_id is required')
 
         self.api_key = api_key
         self.org_id = org_id

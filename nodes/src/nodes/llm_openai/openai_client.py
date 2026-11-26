@@ -29,7 +29,7 @@ import os
 from typing import Any, Dict
 
 from ai.common.chat import ChatBase
-from ai.common.config import Config, require_config
+from ai.common.config import Config, ConfigError
 from ai.common.model_gateway import (
     close_http_clients,
     hosted_http_clients,
@@ -98,10 +98,8 @@ class Chat(ChatBase):
         # No key at all is the pipeline's to fix: refuse it as configuration, not
         # as a start failure. The library falls back to OPENAI_API_KEY, so only
         # when that is unset too.
-        require_config(
-            apikey or os.environ.get('OPENAI_API_KEY'),
-            f'{provider}: no API key is configured. Set "apikey" on the node, or a variable for it.',
-        )
+        if not (apikey or os.environ.get('OPENAI_API_KEY')):
+            raise ConfigError(f'{provider}: no API key is configured. Set "apikey" on the node, or a variable for it.')
 
         # Reasoning models stream via the Responses API + max_completion_tokens.
         if self._is_reasoning:

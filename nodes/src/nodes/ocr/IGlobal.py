@@ -26,7 +26,7 @@ import io
 import threading
 from typing import List, Tuple, Any
 from rocketlib import IGlobalBase, debug, error
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 
 from depends import depends
 
@@ -127,7 +127,7 @@ class ModelServerOCR(OCRInstance):
             from ai.common.models import Surya
 
             return Surya()
-        raise ValueError(f'Unknown OCR engine: {self.engine}')
+        raise ConfigError(f'Unknown OCR engine: {self.engine}')
 
     def content(self, document) -> List[List[Tuple]]:
         """

@@ -23,7 +23,7 @@
 
 import os
 from rocketlib import IGlobalBase, debug
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 
 
 class IGlobal(IGlobalBase):
@@ -101,12 +101,12 @@ class IGlobal(IGlobalBase):
 
                     # Ensure it's actually a dictionary
                     if not isinstance(parsed_dict, dict):
-                        raise ValueError(
+                        raise ConfigError(
                             f'Reducto {field_name} must be a Python dictionary, got {type(parsed_dict).__name__}'
                         )
 
                 except (ValueError, SyntaxError) as e:
-                    raise ValueError(f'Reducto {field_name} contains invalid Python dictionary syntax: {str(e)}')
+                    raise ConfigError(f'Reducto {field_name} contains invalid Python dictionary syntax: {str(e)}')
 
         debug('Reducto config validation completed successfully')
 

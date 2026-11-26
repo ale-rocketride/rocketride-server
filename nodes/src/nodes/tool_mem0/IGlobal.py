@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import IGlobalBase, OPEN_MODE, error, warning
 
 # Defaults / bounds (avoid magic constants scattered in the code).
@@ -50,7 +50,7 @@ class IGlobal(IGlobalBase):
         api_key = str(cfg.get('api_key') or os.environ.get('MEM0_API_KEY', '')).strip()
         if not api_key:
             error('mem0: api_key is required — set it in node config or the MEM0_API_KEY env var')
-            raise ValueError('mem0: api_key is required')
+            raise ConfigError('mem0: api_key is required')
 
         self.api_key = api_key
         # Optional override for self-hosted / enterprise deployments; blank uses

@@ -21,61 +21,45 @@
 # SOFTWARE.
 
 """
-ai.common.config.ConfigError / require_config: a node configuration the user must fix.
+ai.common.config.ConfigError: a node configuration the user must fix.
 
-The engine's exception translator (engLib/python/call.hpp) keeps the error code
-of an exception that carries __formatted/code/message/filename/function/line, so
-a ConfigError reaches the run as Ec.InvalidParam: a refused pipeline.
+It is rocketlib's ConfigError, an APERR with Ec.InvalidParam, so the engine's
+exception translator (engLib/python/call.hpp) reports it with that code: a
+refused pipeline. Still a ValueError for existing handlers.
 """
 
 import pytest
 
-from ai.common.config import ConfigError, UnresolvedCredentialError, check_credential_resolved, require_config
-from rocketlib import Ec
+import ai.common.config as config_module
+import rocketlib
+from ai.common.config import ConfigError, UnresolvedCredentialError, check_credential_resolved
+from rocketlib import APERR, Ec
 
 
-def test_require_config_passes_and_refuses():
-    require_config('key', 'unused')
-    with pytest.raises(ConfigError, match='no API key'):
-        require_config('', 'llm_openai: no API key is configured')
+def test_is_rocketlibs_config_error():
+    assert ConfigError is rocketlib.ConfigError
 
 
-def test_carries_what_the_engine_reads():
-    try:
-        require_config(None, 'bad setting')
-    except ConfigError as e:
-        assert getattr(e, '__formatted') is True
-        assert e.code == int(Ec.InvalidParam)
-        assert e.message == 'bad setting'
-        assert e.filename == __file__ and e.function == 'test_carries_what_the_engine_reads' and e.line > 0
-    else:
-        pytest.fail('not raised')
+def test_an_invalid_param_aperr_with_the_message_alone():
+    error = ConfigError('llm_openai: no API key is configured')
+    assert isinstance(error, APERR)
+    assert error.ec == Ec.InvalidParam
+    assert str(error) == 'llm_openai: no API key is configured'
 
 
 def test_still_a_value_error():
     # handlers written for ValueError keep catching it
     with pytest.raises(ValueError):
-        require_config(False, 'x')
+        raise ConfigError('x')
 
 
 def test_unfilled_credentials_are_configuration_errors():
     with pytest.raises(UnresolvedCredentialError) as raised:
         check_credential_resolved('llm_openai', 'apikey', '${ROCKETRIDE_OPENAI_KEY}')
     assert isinstance(raised.value, ConfigError)
-    assert raised.value.code == int(Ec.InvalidParam)
-    # reported where the check raised it, not in ConfigError's constructor
-    assert raised.value.function == 'check_credential_resolved'
+    assert raised.value.ec == Ec.InvalidParam
+    assert 'ROCKETRIDE_OPENAI_KEY' in str(raised.value)
 
 
-class _Node:
-    """A node that validates its configuration in its own constructor."""
-
-    def __init__(self, key):
-        require_config(key, 'no key')  # the line the error must point at
-
-
-def test_reported_where_the_node_refused_even_in_a_constructor():
-    with pytest.raises(ConfigError) as raised:
-        _Node('')
-    assert raised.value.function == '__init__'
-    assert raised.value.filename == __file__
+def test_no_require_config_helper():
+    assert not hasattr(config_module, 'require_config')

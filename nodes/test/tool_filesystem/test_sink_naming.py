@@ -154,6 +154,7 @@ def _install_stubs():
     if 'ai.common.config' not in sys.modules:
         m = types.ModuleType('ai.common.config')
         m.Config = object
+        m.ConfigError = type('ConfigError', (ValueError,), {})
         sys.modules['ai.common.config'] = m
     if 'ai.common.utils' not in sys.modules:
         m = types.ModuleType('ai.common.utils')

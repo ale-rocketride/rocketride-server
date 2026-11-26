@@ -150,3 +150,21 @@ class APERR(Exception):
         if hasattr(Ec, data['code']):
             return APERR(getattr(Ec, data['code']), data['message'])
         return APERR(Ec.InvalidParam, data['message'])
+
+
+class ConfigError(APERR, ValueError):
+    """
+    A node's configuration is invalid: the user's to fix, not a platform failure.
+
+    Raise it for a problem found without calling anything (a missing or unfilled
+    credential, an invalid setting); a provider that rejects a key or does not
+    answer is not one. The engine reports it with Ec.InvalidParam, so a run that
+    stops on it before it starts is a refused pipeline, not a start failure.
+    A ValueError too, so existing ``except ValueError`` handlers still catch it.
+    """
+
+    def __init__(self, message: str):
+        """Initialize with the message shown to the user."""
+        APERR.__init__(self, Ec.InvalidParam, message)
+        # str(e) is the message alone, as for the ValueError it replaces
+        self.args = (message,)

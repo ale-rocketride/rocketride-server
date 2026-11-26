@@ -26,7 +26,7 @@ import re
 from urllib.parse import urlparse
 from typing import Optional
 from rocketlib import IGlobalBase, warning
-from ai.common.config import Config, warn_if_credential_unresolved
+from ai.common.config import Config, ConfigError, warn_if_credential_unresolved
 from ai.common.chat import ChatBase
 
 
@@ -169,18 +169,18 @@ class IGlobal(IGlobalBase):
         bag = self.IEndpoint.endpoint.bag
         config = Config.getNodeConfig(self.glb.logicalType, self.glb.connConfig)
         if not config.get('apikey'):
-            raise ValueError('GMI Cloud API key is required.')
+            raise ConfigError('GMI Cloud API key is required.')
         # No default here: Chat refuses an empty endpoint, and sending a deploy-on-demand
         # model to the shared one would turn that into a 404 halfway through the run.
         serverbase = config.get('serverbase')
         if not serverbase:
-            raise ValueError(
+            raise ConfigError(
                 'GMI Cloud endpoint URL is required for this model. '
                 'Deploy it in the GMI Cloud console and paste the endpoint URL into the node.'
             )
         err = self._validate_serverbase(serverbase)
         if err:
-            raise ValueError(err)
+            raise ConfigError(err)
         self._chat = Chat(self.glb.logicalType, config, bag)
 
     def endGlobal(self):

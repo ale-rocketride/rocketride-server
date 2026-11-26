@@ -102,10 +102,8 @@ def check_credential_resolved(logicalType, field, value, connConfig=None):
         raise ValueError(f'{logicalType}.{field} is an unfilled placeholder')
 
 
-def require_config(condition, message):
-    """Stand-in for ai.common.config.require_config: a configuration problem when the condition is false."""
-    if not condition:
-        raise ValueError(message)
+class ConfigError(ValueError):
+    """Stand-in for ai.common.config.ConfigError: a configuration the user must fix."""
 
 
 class Config:
@@ -188,7 +186,7 @@ def install_stubs(*, real_tools_base: bool = False, stub_network: bool = True) -
     cfg = sys.modules['ai.common.config']
     cfg.Config = Config
     cfg.check_credential_resolved = check_credential_resolved
-    cfg.require_config = require_config
+    cfg.ConfigError = ConfigError
 
     desc = types.ModuleType('ai.common.avi.descriptor')
     desc.forward_enriched_audio = _forwarder('Audio')

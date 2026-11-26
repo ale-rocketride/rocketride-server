@@ -423,12 +423,12 @@ LOGINS = telemetry.Counter(
 LOGINS.add(outcome='success', org=org_id)
 ```
 
-A node signals a configuration the user must fix with
-`ai.common.config.require_config(condition, message)` (or by raising `ConfigError`
-from the same module): the run is then `start_rejected`, not a
-start error. Use it only for problems found without calling anything, such as an
-empty or unfilled credential; a provider that rejects a key or does not answer is
-not one.
+A node signals a configuration the user must fix by raising `ConfigError`
+(`from ai.common.config import ConfigError`, also exported by `rocketlib`): the
+run is then `start_rejected`, not a start error. Use it only for problems found
+without calling anything, such as an empty or unfilled credential or an invalid
+setting; a provider that rejects a key or does not answer is not one. Any other
+exception a node raises, a plain `ValueError` included, is a start error.
 
 Only the declared attribute keys are exported. Values are capped in length and in
 the number of distinct combinations per metric. `telemetry.Histogram` and the
