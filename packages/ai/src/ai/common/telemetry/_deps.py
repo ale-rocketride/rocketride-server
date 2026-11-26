@@ -52,7 +52,7 @@ import threading
 import time
 import weakref
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from opentelemetry.sdk.trace import Event, ReadableSpan, SpanProcessor
 from opentelemetry.trace import SpanKind, Status, StatusCode
@@ -327,7 +327,7 @@ class SqlRecorder:
             self._on_call(
                 Call(
                     'db.client.operation.duration',
-                    f'{operation} {base.get("db.namespace") or base["db.system.name"]}',
+                    f'{operation} {base["db.system.name"]}',  # never the database's name
                     started,
                     time.time_ns(),
                     attributes,
@@ -341,9 +341,8 @@ class SqlRecorder:
         url = engine.url
         system = self._SYSTEMS.get(engine.dialect.name, engine.dialect.name)
         attributes: Dict[str, Any] = {'db.system.name': system}
-        if system != 'sqlite':  # a sqlite database is a file path, not a name
-            if url.database:
-                attributes['db.namespace'] = url.database
+        # Never the database's name (a customer's or a tenant's): system and server only
+        if system != 'sqlite':  # a sqlite database is a file path
             if url.host:
                 attributes['server.address'] = url.host
             if url.port:
@@ -1052,6 +1051,24 @@ def call_name(method: Any, template: Optional[str]) -> Optional[str]:
     if not method:
         return None
     return f'{method} {template}' if template and template != '_OTHER' else str(method)
+
+
+def kept_call_name(attributes: Mapping[str, Any], fallback: str) -> str:
+    """
+    A dependency call's name from its kept attributes alone (a library names its
+    span after the database or collection): '{method} {url.template}',
+    '{db.operation.name} {db.system.name}', '{rpc.service}/{rpc.method}', else fallback.
+    """
+    name = call_name(attributes.get('http.request.method'), attributes.get('url.template'))
+    if name:
+        return name
+    system = attributes.get('db.system.name')
+    if system:
+        operation = attributes.get('db.operation.name')
+        return f'{operation} {system}' if operation else str(system)
+    if attributes.get('rpc.service') and attributes.get('rpc.method'):
+        return f'{attributes["rpc.service"]}/{attributes["rpc.method"]}'
+    return fallback
 
 
 def _clean_text(text: Any, redact: Callable[[str], str]) -> str:

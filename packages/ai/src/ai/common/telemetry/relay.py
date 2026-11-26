@@ -644,9 +644,8 @@ def relay_spans() -> Any:
                 url = (span.attributes or {}).get('url.full') or (span.attributes or {}).get('http.url')
                 if url and _deps._scheme(url):
                     attributes['url.scheme'] = _deps._scheme(url)
-                name = (
-                    _deps.call_name(attributes.get('http.request.method'), attributes.get('url.template')) or span.name
-                )
+                # Never the library's span name: it can carry a database or collection name
+                name = _deps.kept_call_name(attributes, metric)
                 emit(_deps.Call(metric, name, span.start_time, span.end_time, attributes, error_type), scope)
             except Exception:
                 pass

@@ -156,6 +156,29 @@ def test_relay_spans_turn_library_spans_into_calls(written):
     assert record['x'] == '429' and record['a']['http.response.status_code'] == 429
 
 
+def test_a_library_span_named_after_its_database_is_named_from_its_attributes(written):
+    from opentelemetry.sdk.trace import TracerProvider
+
+    provider = TracerProvider()
+    provider.add_span_processor(relay.relay_spans())
+    tracer = provider.get_tracer('opentelemetry.instrumentation.psycopg')
+    with tracer.start_as_current_span(
+        'SELECT customers_db',
+        kind=SpanKind.CLIENT,
+        attributes={
+            'db.system.name': 'postgresql',
+            'db.operation.name': 'SELECT',
+            'db.namespace': 'customers_db',
+            'server.address': 'db.internal',
+        },
+    ):
+        pass
+    relay.flush()
+    (record,) = records(written)
+    assert record['n'] == 'SELECT postgresql'
+    assert 'customers_db' not in json.dumps(record)
+
+
 # ── The EaaS side ────────────────────────────────────────────────────────────
 
 
@@ -329,6 +352,39 @@ def test_one_relayed_record_that_cannot_be_read_does_not_cost_the_batch(sink):
     assert measured.count == 1
     (errors,) = [p for p in _points_of(reader, 'rocketride.telemetry.hook_errors') if p.value]
     assert dict(errors.attributes)['rocketride.telemetry.hook'] == 'relay_record' and errors.value == 1
+
+
+def test_a_relayed_sql_call_names_no_database(sink, written):
+    from types import SimpleNamespace
+
+    class Engine:  # a named database on a server (SQLAlchemy's engine, as the recorder reads it)
+        url = SimpleNamespace(database='customers_db', host='db.internal', port=5432)
+        dialect = SimpleNamespace(name='postgresql')
+
+    calls = []
+    engine = Engine()
+    _deps.SqlRecorder(calls.append)._record(engine, 'SELECT * FROM orders', time.time_ns() - 1000, None)
+    (call,) = calls
+    assert call.name == 'SELECT postgresql' and 'db.namespace' not in call.attributes
+
+    telemetry, spans, reader = sink
+    _begin(telemetry)
+    t = time.time()
+    telemetry.component_trace('task-1', 'enter', 3, 'my_llm', t, {}, PIPELINE)
+    call.start_ns, call.end_ns = int((t + 0.1) * 1e9), int((t + 0.2) * 1e9)
+    relay.emit(call, relay._Scope(3, 'my_llm'))
+    relay.flush()
+    telemetry.dependency_relayed('task-1', {'calls': records(written)}, PIPELINE)
+    telemetry.component_trace('task-1', 'leave', 3, 'my_llm', t + 0.5, {}, PIPELINE)
+    assert telemetry.flush_traces(5)
+    telemetry._tracer_provider.force_flush()
+    (span,) = [s for s in spans.get_finished_spans() if s.kind == SpanKind.CLIENT]
+    assert span.name == 'SELECT postgresql'
+    assert 'customers_db' not in json.dumps(dict(span.attributes))
+    telemetry.flush_measurements()
+    (measured,) = _points_of(reader, 'db.client.operation.duration')
+    assert 'customers_db' not in json.dumps(dict(measured.attributes))
+    assert dict(measured.attributes)['db.system.name'] == 'postgresql'
 
 
 def test_relayed_attributes_are_only_the_known_ones(sink):
