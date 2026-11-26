@@ -101,10 +101,10 @@ Use `on_disconnected` for "we were connected and then dropped"; use
 ## Distributed tracing
 
 When your application uses OpenTelemetry and a span is active, every request the
-client sends carries that span's W3C `traceparent`. The server records the request
-as a child span in your trace when its telemetry is on (it is off by default) and
-your span is sampled; otherwise the request is a trace of its own, kept only when
-it failed or was slow. `opentelemetry-api` is not a dependency:
+client sends carries that span's W3C `traceparent`. With the server's telemetry
+off (the default), the server records no trace. With it on, the request is a child
+span in your trace when your span is sampled; when it is not, the request is a trace
+of its own, kept only when it failed or was slow. `opentelemetry-api` is not a dependency:
 without it, nothing is added. Set `ROCKETRIDE_TRACE_PROPAGATION=false` to turn
 this off. See [Telemetry](/operate/self-hosting/telemetry#tracing-from-your-application).
 

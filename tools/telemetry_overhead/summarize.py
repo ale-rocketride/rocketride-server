@@ -61,10 +61,14 @@ def main() -> None:
                 f'{port:>8} {p50:8.1f} {added(p50, base[0]):>13} {p95:8.1f} {added(p95, base[1]):>13}'
                 f' {ticks:10.0f} {added(ticks, base[2]):>13}{tag}'
             )
-        spread = [max(medians[p][i] for p in present) - min(medians[p][i] for p in present) for i in range(3)]
-        print(
-            f'   noise floor (off servers apart): p50 {spread[0]:.1f} ms, p95 {spread[1]:.1f} ms, cpu {spread[2]:.0f} ticks'
-        )
+        if len(present) < 2:
+            print('   noise floor: n/a (needs at least two off servers)')
+        else:
+            spread = [max(medians[p][i] for p in present) - min(medians[p][i] for p in present) for i in range(3)]
+            print(
+                f'   noise floor (off servers apart): p50 {spread[0]:.1f} ms, p95 {spread[1]:.1f} ms,'
+                f' cpu {spread[2]:.0f} ticks'
+            )
     if failed:
         print(f'{failed} run(s) FAILED: see the log')
 
