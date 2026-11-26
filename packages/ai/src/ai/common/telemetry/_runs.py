@@ -79,6 +79,11 @@ from ._common import (
 )
 
 
+def _closed_failed(why: str) -> bool:
+    """A pass closed for a reason that counts as its failure (stuck, unwound, shutdown), not abandoned."""
+    return bool(why) and why != 'task_end'
+
+
 class _RunsTelemetry:
     """Pipeline runs and their passes (mixed into _otel.Telemetry)."""
 
@@ -463,6 +468,8 @@ class _RunsTelemetry:
         if len(self._runs) >= MAX_LIVE_TASKS:
             _, evicted = self._runs.popitem(last=False)
             self._release(evicted)
+            for invocation in evicted.invocations.values():
+                self._evicted_models.extend(invocation.models)
             self._evicted += 1  # counted by _count_evictions, outside the lock
         run = self._runs[task_id] = _Run()
         run.trace_id, run.span_id = _new_ids(self._random)
@@ -471,8 +478,12 @@ class _RunsTelemetry:
     def _count_evictions(self) -> None:
         with self._lock:
             evicted, self._evicted = self._evicted, 0
+            models, self._evicted_models = self._evicted_models, []
         if evicted:
             self.count_dropped('run_evicted', evicted)
+        # the model calls are measured all the same (no trace: there is none to name)
+        for _type, start, finish, gen_attributes, gen_error, _m, _r, usage, _a, _s, _c in models:
+            self._measure_model_call(gen_attributes, (finish - start) / 1e9, gen_error, usage, None)
 
     def _release(self, run: _Run) -> None:
         """Give back the buffered-call budget of a run's open invocations. Under the lock."""
@@ -609,12 +620,14 @@ class _RunsTelemetry:
 
     def _component_type(self, run: _Run, component_id: str, pipeline: Optional[Dict[str, Any]]) -> str:
         """The component's provider (its node type), bounded; never the user-chosen id. Under the lock."""
-        if run.types is None:
+        # Cached once a pipeline arrives: an event without one does not settle it as empty
+        components = pipeline.get('components') if isinstance(pipeline, dict) else None
+        if run.types is None and components and isinstance(components, list):
             run.types = {}
-            for component in (pipeline or {}).get('components') or []:
+            for component in components:
                 if isinstance(component, dict) and component.get('id'):
                     run.types[str(component['id'])] = str(component.get('provider') or '_unknown')[:MAX_VALUE_LENGTH]
-        provider = run.types.get(component_id)
+        provider = (run.types or {}).get(component_id)
         return self._bounded_type_locked(provider) if provider else '_unknown'
 
     def _turn_outcome(self, invocation: _Invocation, why: str) -> Tuple[str, Optional[str], Optional[str]]:
@@ -702,7 +715,7 @@ class _RunsTelemetry:
             self._turn_duration.record(
                 max(0.0, end - invocation.start), self._bounded('rocketride.turn.duration', timed), context=exemplar
             )
-        for _type, start, finish, gen_attributes, gen_error, _m, _r, usage, _a, span_id in invocation.models:
+        for _type, start, finish, gen_attributes, gen_error, _m, _r, usage, _a, span_id, _c in invocation.models:
             self._measure_model_call(
                 gen_attributes,
                 (finish - start) / 1e9,
@@ -731,7 +744,9 @@ class _RunsTelemetry:
         """Decide whether the pass's trace is kept (failed and slow ones always), count its outcome and queue it."""
         duration = max(0.0, end - invocation.start)
         dropped = ''
-        if invocation.error:
+        # closed stuck, unwound or by a shutdown: a failure, as the turn metric counts it
+        # (a run that ended with the pass open leaves it abandoned instead)
+        if invocation.error or _closed_failed(why):
             reason = 'error'
         elif invocation.stall_noted:
             reason = 'stalled'  # a stall error line named this trace: it must resolve
@@ -796,9 +811,14 @@ class _RunsTelemetry:
         return self._ratio >= 1.0 or (self._ratio > 0.0 and self._random.random() < self._ratio)
 
     def _trace_worker(self) -> None:
-        """The 'otel-traces' thread: builds the queued pipeline traces; None stops it."""
+        """The 'otel-traces' thread: builds the queued pipeline traces; stops at shutdown once none are left."""
         while True:
-            item = self._traces.get()
+            try:
+                item = self._traces.get(timeout=0.25)
+            except queue.Empty:
+                if self._traces_stop.is_set():
+                    return
+                continue
             try:
                 if item is None:
                     return
@@ -884,9 +904,9 @@ class _RunsTelemetry:
             root.set_status(Status(StatusCode.ERROR, f'{component_type}: {error_type}'))
             root.set_attribute('error.type', error_type)
             root.set_attribute('rocketride.component.type', component_type)
-        elif unclosed and invocation.call_error:
-            # Cut open (the run ended, a stop, a shutdown) after a call failed: that failure
-            # is the likely cause, not a success
+        elif unclosed and (invocation.call_error or _closed_failed(why)):
+            # Cut open after a call failed (that failure is the likely cause, not a
+            # success), or closed stuck, unwound or by a shutdown
             root.set_status(Status(StatusCode.ERROR, _cut_cause(invocation, why)))
         if unclosed and why:
             root.set_attribute('rocketride.pass.closed_by', why[:MAX_VALUE_LENGTH])
@@ -938,7 +958,7 @@ class _RunsTelemetry:
                 child.set_attribute('error.type', code or cls)
                 child.add_event('exception', _raised_attributes(cls, message, location), timestamp=_ns(wall))
             child.end(end_time=_ns(max(finish, start)))
-            spans.append((component_type, start, max(finish, start), child))
+            spans.append((component_type, start, max(finish, start), child, component_id))
         # A node's logical model calls (GenAI conventions): their HTTP tries go under them
         models = []
         for (
@@ -952,8 +972,9 @@ class _RunsTelemetry:
             usage,
             answered_by,
             model_span_id,
+            model_component,
         ) in sorted(invocation.models, key=lambda m: m[1]):
-            parent = _call_parent(spans, component_type, start_ns / 1e9, end_ns / 1e9)
+            parent = _call_parent(spans, component_type, model_component, start_ns / 1e9, end_ns / 1e9)
             name = ' '.join(
                 part
                 for part in (gen_attributes.get('gen_ai.operation.name'), gen_attributes.get('gen_ai.request.model'))
@@ -986,16 +1007,19 @@ class _RunsTelemetry:
                 if message:
                     model.add_event('exception', {'exception.message': message}, timestamp=end_ns)
             model.end(end_time=end_ns)
-            models.append([component_type, start_ns, end_ns, model, {}])
+            models.append([component_type, start_ns, end_ns, model, {}, model_component])
         tolerance = int(MATCH_TOLERANCE * 1e9)
-        for component_type, name, start_ns, end_ns, call_attributes, error_type, span_id in sorted(
+        for component_type, name, start_ns, end_ns, call_attributes, error_type, span_id, call_component in sorted(
             invocation.calls, key=lambda c: c[2]
         ):
             holder = next(
                 (
                     m
                     for m in models
-                    if m[0] == component_type and m[1] - tolerance <= start_ns and end_ns <= m[2] + tolerance
+                    if m[0] == component_type
+                    and m[5] == call_component
+                    and m[1] - tolerance <= start_ns
+                    and end_ns <= m[2] + tolerance
                 ),
                 None,
             )
@@ -1011,7 +1035,7 @@ class _RunsTelemetry:
                         call_attributes = dict(call_attributes, **{'http.request.resend_count': tries})
                     holder[4][key] = tries + 1
             else:
-                parent = _call_parent(spans, component_type, start_ns / 1e9, end_ns / 1e9)
+                parent = _call_parent(spans, component_type, call_component, start_ns / 1e9, end_ns / 1e9)
             # A call that sent a traceparent (the model server) keeps the span id it sent:
             # the server's span is its child
             with _preset_ids(0, span_id) if span_id else contextlib.nullcontext():
@@ -1072,10 +1096,17 @@ class _RunsTelemetry:
         for _task_id, component_type, org_id, seconds in passes:
             key = (component_type, self._org(org_id) or '')
             idle[key] = max(idle.get(key, 0.0), seconds)
+        # Past the cap, the pairs not yet tracked report together as one '_other'
+        # series, tracked like the others (it too goes back to 0 when idle no more)
+        overflow = ('_other', '')
         with self._lock:
-            for key in idle:
+            for key, seconds in list(idle.items()):
                 if key in self._idle_keys or len(self._idle_keys) < MAX_ATTRIBUTE_SETS:
                     self._idle_keys[key] = now
+                else:
+                    del idle[key]
+                    idle[overflow] = max(idle.get(overflow, 0.0), seconds)
+                    self._idle_keys[overflow] = now
             for key, seen in list(self._idle_keys.items()):
                 if key not in idle and now - seen > IDLE_KEY_SECONDS:
                     del self._idle_keys[key]
@@ -1083,7 +1114,7 @@ class _RunsTelemetry:
         for task_id, component_type, org_id, seconds, trace_id, project in stalled:
             self._stall_line(task_id, component_type, org_id, seconds, trace_id, project)
         observations = []
-        for component_type, org in keys | set(idle):
+        for component_type, org in keys:
             attributes = {'rocketride.component.type': component_type}
             if org:
                 attributes[ORG_KEY] = org

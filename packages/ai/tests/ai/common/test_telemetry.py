@@ -1224,3 +1224,19 @@ def test_a_full_trace_queue_does_not_keep_the_worker_from_stopping(monkeypatch):
         release.set()
     telemetry._trace_thread.join(5)
     assert not telemetry._trace_thread.is_alive()
+    assert telemetry._traces.empty()  # what was admitted was built, none thrown away
+
+
+def test_idle_pairs_past_the_cap_report_as_one_other_series(monkeypatch):
+    monkeypatch.setattr(_runs, 'MAX_ATTRIBUTE_SETS', 1)
+    telemetry, _, reader = make()
+    try:
+        begin(telemetry, 'task-1')
+        begin(telemetry, 'task-2')
+        _open_call(telemetry, 'my_secret_llm_name', idle=30, task_id='task-1')
+        _open_call(telemetry, 'parse_1', idle=70, task_id='task-2')
+        idle = _idle(reader)
+        assert len(idle) == 2 and ('_other', None) in idle  # one tracked pair, the rest together
+        assert max(idle.values()) == 70
+    finally:
+        telemetry.shutdown(1)

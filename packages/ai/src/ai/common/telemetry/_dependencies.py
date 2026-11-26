@@ -26,6 +26,7 @@ A part of the telemetry sink: mixed into _otel.Telemetry, whose state it uses.
 """
 
 import contextvars
+import math
 import os
 import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -59,6 +60,14 @@ from ._common import (
     _TRACE_ID,
     _SPAN_ID,
 )
+
+
+def _valid_retry(retry: Any) -> bool:
+    """A relayed retry as relay.model_call writes it: [time ns, error kind, delay s], numbers where numbers go."""
+    if not (isinstance(retry, list) and len(retry) == 3):
+        return False
+    at, _kind, wait = retry
+    return all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (at, wait)) and math.isfinite(wait)
 
 
 class _DependenciesTelemetry:
@@ -108,7 +117,7 @@ class _DependenciesTelemetry:
             return
         error_type = str(body['x'])[:MAX_VALUE_LENGTH] if body.get('x') else None
         message = str(body.get('g') or '')[:MAX_CAUSE_LENGTH]
-        retries = [r for r in body.get('r') or [] if isinstance(r, list) and len(r) == 3][:16]
+        retries = [r for r in body.get('r') or [] if _valid_retry(r)][:16]
         raw_usage = body.get('u') if isinstance(body.get('u'), dict) else {}
         usage = {k: v for k, v in raw_usage.items() if k in ('input', 'output', 'cache_read') and isinstance(v, int)}
         answered_by = str(body.get('rm') or '')[:MAX_VALUE_LENGTH]
@@ -121,7 +130,19 @@ class _DependenciesTelemetry:
                 component_type = self._component_type(run, str(component), pipeline)
                 span_id = _new_ids(self._random)[1]
                 invocation.models.append(
-                    (component_type, start, end, attributes, error_type, message, retries, usage, answered_by, span_id)
+                    (
+                        component_type,
+                        start,
+                        end,
+                        attributes,
+                        error_type,
+                        message,
+                        retries,
+                        usage,
+                        answered_by,
+                        span_id,
+                        str(component),
+                    )
                 )
                 invocation.call_error = invocation.call_error or bool(error_type)
                 held = True
@@ -283,7 +304,9 @@ class _DependenciesTelemetry:
                 # the others get theirs now, for the exemplar
                 span_id = int(body['i'], 16) if isinstance(body.get('i'), str) and _SPAN_ID.match(body['i']) else 0
                 span_id = span_id or _new_ids(self._random)[1]
-                invocation.calls.append((component_type, name, start, max(end, start), attributes, error_type, span_id))
+                invocation.calls.append(
+                    (component_type, name, start, max(end, start), attributes, error_type, span_id, str(component))
+                )
                 invocation.call_error = invocation.call_error or bool(error_type)
                 self._buffered += 1
                 if error_type:

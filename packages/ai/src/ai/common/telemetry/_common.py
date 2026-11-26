@@ -287,7 +287,11 @@ class _SlowLimiter:
                 if bucket is None:
                     bucket = self._buckets[key] = [rate * 60, now]
                     if len(self._buckets) > 10000:
+                        # least recently used first: the process's bucket, used on every
+                        # call, is never the one dropped (it would come back full)
                         self._buckets.popitem(last=False)
+                else:
+                    self._buckets.move_to_end(key)
                 bucket[0] = min(rate * 60, bucket[0] + (now - bucket[1]) * rate)
                 bucket[1] = now
                 buckets.append(bucket)
@@ -364,14 +368,15 @@ class _Invocation:
         # (component type, wall time, error type, message, component id)
         self.marks: List[Tuple[str, float, str, str, str]] = []
         # Logical model calls a node made (relay.model_call): (component type, start ns,
-        # end ns, gen_ai attributes, error type, provider message, retries)
+        # end ns, gen_ai attributes, error type, provider message, retries, usage, model
+        # that answered, span id, component id)
         self.models: List[Tuple[Any, ...]] = []
         # Exceptions its nodes' handlers raised (relay._raised), shared with the run's
         # record: [component type, class, message, location, monotonic, engine code, wall, component id]
         self.raised: List[List[Any]] = []
         # Dependency calls the subprocess relayed (relay.py): (component type, name, start ns, end ns,
-        # attributes, error type, span id: the one its traceparent carried, 0 if none)
-        self.calls: List[Tuple[str, str, int, int, Dict[str, Any], Optional[str], int]] = []
+        # attributes, error type, span id: the one its traceparent carried, 0 if none, component id)
+        self.calls: List[Tuple[str, str, int, int, Dict[str, Any], Optional[str], int, str]] = []
         self.dropped = 0
         self.error = False
         self.call_error = False  # a relayed dependency call failed (the pass itself may not have)
@@ -510,13 +515,16 @@ def _exemplar(trace_id: int, span_id: int, kept: bool) -> Optional[Any]:
     return trace.set_span_in_context(trace.NonRecordingSpan(SpanContext(trace_id, span_id, False, flags)))
 
 
-def _call_parent(spans: List[Tuple[str, float, float, Any]], component_type: str, start: float, end: float) -> Any:
-    """The component span a relayed call belongs to: same type, covering it (within MATCH_TOLERANCE); else the
-    nearest earlier one of that type; None (the pass root) when the type never ran.
+def _call_parent(
+    spans: List[Tuple[str, float, float, Any, str]], component_type: str, component_id: str, start: float, end: float
+) -> Any:
+    """The component span a relayed call belongs to: same component, covering it (within MATCH_TOLERANCE); else the
+    nearest earlier call of that component; None (the pass root) when it never ran. Two adjacent nodes of one
+    type stay apart: the component id decides before the time.
     """
     best = None
-    for span_type, span_start, span_end, span in spans:
-        if span_type != component_type or span_start > end + MATCH_TOLERANCE:
+    for span_type, span_start, span_end, span, span_component in spans:
+        if span_type != component_type or span_component != component_id or span_start > end + MATCH_TOLERANCE:
             continue
         if span_start - MATCH_TOLERANCE <= start and end <= span_end + MATCH_TOLERANCE:
             return span

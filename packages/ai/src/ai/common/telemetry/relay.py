@@ -37,10 +37,11 @@ EaaS measures it and attaches it to the pass and component that made it
 
 The component is the node instance the engine is calling into: every
 IInstanceBase subclass's handlers are wrapped to make (pipe, component id)
-current for the call. The wrapping is done when the class is defined, so only
-classes defined after install() get it (ai/node.py installs before loading any
-node); one defined earlier is named in a warning and its calls carry no
-component. A call made on a thread or event loop the node started itself has
+current for the call. The wrapping is done when the class that defines a
+handler is defined, so only handlers defined after install() get it (ai/node.py
+installs before loading any node); a class defined earlier is named in a warning
+and its calls carry no component, and so do a later subclass's calls to a handler
+it inherits from that class. A call made on a thread or event loop the node started itself has
 no component; EaaS still measures it.
 
 What is written: the call's name, times, error type and a few bounded
@@ -424,14 +425,18 @@ def _component_id(pipe_type: Any) -> Optional[str]:
     return str(value) if value else None
 
 
-def emit(call: Any, scope: Optional[_Scope] = None) -> None:
+_CURRENT: Any = object()  # emit's default: the node call being handled on this thread
+
+
+def emit(call: Any, scope: Any = _CURRENT) -> None:
     """Queue one call for EaaS, with the component it was made for (when it can be placed).
 
     scope: the node call it was made for, when it ends off that call (a
-    streamed response read on another thread or after the handler returned).
+    streamed response read on another thread or after the handler returned);
+    None when it started outside any node call (it is then never placed).
     """
     global _overflow
-    scope = scope if scope is not None else _current()
+    scope = _current() if scope is _CURRENT else scope
     record = {
         'm': call.metric,
         'n': call.name,
@@ -622,7 +627,9 @@ def relay_spans() -> Any:
         def on_start(self, span: Any, parent_context: Any = None) -> None:
             _deps.client_started(span)
             scope = _current()
-            if scope is not None and span.kind == SpanKind.CLIENT:
+            if span.kind == SpanKind.CLIENT:
+                # None too: a call started outside any node call stays unattributed,
+                # whichever handler is running when its streamed response closes
                 with started_lock:
                     started[span.context.span_id] = scope
                     if len(started) > MAX_STARTED:
@@ -631,7 +638,7 @@ def relay_spans() -> Any:
         def on_end(self, span: Any) -> None:
             try:
                 with started_lock:
-                    scope = started.pop(span.context.span_id, None)
+                    scope = started.pop(span.context.span_id, _CURRENT)
                 if not _deps.client_ended(span):
                     return  # inside another client span: that one is the call
                 measured = _deps.measurement(span)

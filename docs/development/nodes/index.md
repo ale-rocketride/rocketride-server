@@ -306,7 +306,9 @@ class is defined, so the dependency calls a handler makes (HTTP, databases, Redi
 the model server) are attributed to that node's component. A node class defined
 before `install()` is not wrapped: it is named in one warning line
 (`telemetry: N node classes defined before telemetry started are not traced: ...`)
-and its calls are still measured, without a component. Nodes need no code for this.
+and its calls are still measured, without a component. The same holds for a
+subclass defined later that inherits a handler from such a class: the wrapping
+follows the class that defines the handler. Nodes need no code for this.
 The model server requests go through `ModelClient.send_command`, which calls
 `telemetry.model_server_call()`; a driver a node installs with `depends()` is picked
 up through `depends.after_install_hooks`. With telemetry off nothing is wrapped,

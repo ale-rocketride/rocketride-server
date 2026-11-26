@@ -217,6 +217,8 @@ class Telemetry(_RunsTelemetry, _RequestsTelemetry, _DependenciesTelemetry):
         }
         self._buffered = 0  # component calls held in open invocations (MAX_BUFFERED_CALLS)
         self._evicted = 0  # runs evicted under the lock, counted once it is released
+        # model calls those runs' open passes held: measured once the lock is released
+        self._evicted_models: List[Tuple[Any, ...]] = []
         self._orgs: Set[str] = set()
         self._attribute_sets: Dict[str, Set[FrozenSet]] = {}
         # a metric bounded by the org cap instead (size_attribute_sets): its own limit
@@ -369,6 +371,9 @@ class Telemetry(_RunsTelemetry, _RequestsTelemetry, _DependenciesTelemetry):
 
         # Pipeline traces are built off the event loop (see the module doc)
         self._traces: 'queue.Queue' = queue.Queue(maxsize=TRACE_QUEUE)
+        # set at shutdown: the worker stops once the queue is empty (a full queue
+        # needs no room for a stop signal, and no admitted trace is thrown away)
+        self._traces_stop = threading.Event()
         self._trace_thread = threading.Thread(target=self._trace_worker, name='otel-traces', daemon=True)
         self._trace_thread.start()
 
@@ -638,20 +643,11 @@ class Telemetry(_RunsTelemetry, _RequestsTelemetry, _DependenciesTelemetry):
                     self.count_hook_error('task_span_shutdown')
         # The queued traces get a quarter of the time; the rest is dropped
         self.flush_traces(timeout / 4)
+        self._traces_stop.set()
         try:
-            self._traces.put_nowait(None)
+            self._traces.put_nowait(None)  # wakes the worker now when there is room
         except queue.Full:
-            # still full: make room for the stop signal, or the worker would wait forever
-            try:
-                self._traces.get_nowait()
-                self._traces.task_done()
-                self.count_dropped('trace_queue_full')
-            except queue.Empty:
-                pass
-            try:
-                self._traces.put_nowait(None)
-            except queue.Full:
-                pass
+            pass  # it stops once it has built what was admitted
         half = max(1, int(timeout * 375))
         try:
             self._meter_provider.shutdown(timeout_millis=half)

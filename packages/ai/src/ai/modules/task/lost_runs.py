@@ -108,6 +108,8 @@ class LostRuns:
         self._unknown_calls = 0
         self._unknown_keys: set = set()  # distinct ones (at most MAX_KEYS)
         self._unknown_last: Optional[float] = None
+        self._unknown_capped = False  # more distinct keys came than are kept: the count is a lower bound
+        self._summary_timer: Any = None  # the summary held back by its interval, written when it is due
         self._keys: Dict[str, _Seen] = {}
         # (org, team, project, version) -> its run keys: a rebuild reads only
         # deployments whose version moved (a billing team re-stamped without a
@@ -199,26 +201,47 @@ class LostRuns:
         self._unknown_calls += calls
         if len(self._unknown_keys) < MAX_KEYS:
             self._unknown_keys.add(key)
+        elif key not in self._unknown_keys:
+            self._unknown_capped = True
 
     def _summary(self, now: float) -> None:
         """One line every LINE_EVERY_S for the calls refused for keys no deployment has (none: no line)."""
-        if not self._unknown_calls or (self._unknown_last is not None and now - self._unknown_last < LINE_EVERY_S):
+        if not self._unknown_calls:
             return
-        calls, keys = self._unknown_calls, len(self._unknown_keys)
-        self._unknown_calls, self._unknown_keys, self._unknown_last = 0, set(), now
+        if self._unknown_last is not None and now - self._unknown_last < LINE_EVERY_S:
+            # held back: written when due, even if no other call comes
+            self._schedule_summary(LINE_EVERY_S - (now - self._unknown_last))
+            return
+        calls, keys, capped = self._unknown_calls, len(self._unknown_keys), self._unknown_capped
+        self._unknown_calls, self._unknown_keys, self._unknown_last, self._unknown_capped = 0, set(), now, False
         self._write(
             logfmt.format_line(
                 'error',
                 error_log.LOGGER,
-                f'{calls} refused calls, {keys} distinct unknown keys: calls to a pipeline that is not running '
+                f'{calls} refused calls, {"at least " if capped else ""}{keys} distinct unknown keys: '
+                'calls to a pipeline that is not running '
                 '(TASK_NOT_REGISTERED) with a run key no deployment has (a dev run, a stale or made-up key)',
                 logfmt.log_format(),
                 event='rocketride.task.lost_call_unknown',
                 org_id='unknown',
                 calls=calls,
                 distinct_keys=keys,
+                distinct_keys_capped=True if capped else None,
             )
         )
+
+    def _schedule_summary(self, delay: float) -> None:
+        if self._summary_timer is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop (a test, a shutdown): the next call writes it
+        self._summary_timer = loop.call_later(max(0.0, delay), self._summary_due)
+
+    def _summary_due(self) -> None:
+        self._summary_timer = None
+        self._summary(self._clock())
 
     def _line(self, key: str, now: float) -> None:
         seen = self._keys.get(key)

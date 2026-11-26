@@ -222,3 +222,29 @@ async def test_a_slow_rebuild_has_one_callback_whatever_the_keys_waiting(lost):
         runs.refused(f'pk_slow{n:06d}')
     await _settle(runs)
     assert walked == [50] and len(lines) == 1
+
+
+async def test_a_summary_held_back_by_its_interval_is_written_when_due(lost, monkeypatch):
+    import asyncio
+
+    runs, lines, clock = lost
+    monkeypatch.setattr(lost_runs, 'LINE_EVERY_S', 0.05)
+    runs.refused('pk_' + 'f' * 32)
+    await _settle(runs)
+    assert len(lines) == 1
+    runs.refused('pk_' + 'e' * 32)  # within the interval: held back, and no other call comes
+    assert len(lines) == 1
+    clock.now += 0.06
+    await asyncio.sleep(0.2)
+    assert len(lines) == 2 and json.loads(lines[1])['calls'] == 1
+
+
+async def test_distinct_keys_past_the_cap_are_reported_as_a_lower_bound(lost, monkeypatch):
+    runs, lines, _ = lost
+    monkeypatch.setattr(lost_runs, 'MAX_KEYS', 2)
+    for key in ('pk_' + 'a' * 32, 'pk_' + 'b' * 32, 'pk_' + 'c' * 32):
+        runs._count_unknown(key, 1)
+    runs._summary(runs._clock())
+    (record,) = [json.loads(line) for line in lines]
+    assert (record['calls'], record['distinct_keys'], record['distinct_keys_capped']) == (3, 2, True)
+    assert 'at least 2 distinct' in record['msg']

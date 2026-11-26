@@ -1752,3 +1752,144 @@ def test_a_run_live_at_shutdown_exports_its_task_span_for_its_passes_links():
     assert task.attributes['rocketride.task.closed_by'] == 'shutdown'
     assert 'rocketride.task.outcome' not in task.attributes
     assert [link.context.trace_id for link in pipeline.links] == [task.context.trace_id]
+
+
+def test_an_unwound_pass_is_kept_as_a_failure_at_ratio_zero():
+    spans, reader = InMemorySpanExporter(), InMemoryMetricReader()
+    telemetry = Telemetry(span_exporter=spans, metric_reader=reader, sample_ratio=0.0, org_attribute=True)
+    try:
+        _begin(telemetry)
+        first, second = '4bf92f3577b34da6a3ce929d0e0e4736', '0af7651916cd43dd8448eb211c80319c'
+        t = time.time()
+        telemetry.component_trace('task-1', 'enter', 3, 'my_llm', t, {'tid': first}, PIPELINE)
+        telemetry.component_trace('task-1', 'enter', 3, 'my_llm', t + 1, {'tid': second}, PIPELINE)
+        telemetry.component_trace('task-1', 'leave', 3, 'my_llm', t + 1.1, {'tid': second}, PIPELINE)
+        assert telemetry.flush_traces(5)
+        telemetry._tracer_provider.force_flush()
+        (unwound,) = [s for s in spans.get_finished_spans() if s.name == 'pipeline']
+        assert format(unwound.context.trace_id, '032x') == first  # the counted failure has its trace
+        assert unwound.status.status_code == StatusCode.ERROR
+        assert unwound.attributes['rocketride.pass.closed_by'] == 'pass_unwound'
+    finally:
+        telemetry.shutdown(1)
+
+
+def test_a_relayed_call_goes_to_its_own_component_when_two_of_one_type_are_adjacent(sink):
+    telemetry, spans, _ = sink
+    pipeline = {
+        'components': [
+            {'id': 'chat_1', 'provider': 'chat'},
+            {'id': 'llm_a', 'provider': 'llm_openai'},
+            {'id': 'llm_b', 'provider': 'llm_openai'},
+        ]
+    }
+    _begin(telemetry, 'tok.chat_1')
+    t = time.time()
+    telemetry.component_trace('tok.chat_1', 'enter', 3, 'chat_1', t, {}, pipeline)
+    telemetry.component_trace('tok.chat_1', 'enter', 3, 'llm_a', t + 0.01, {}, pipeline)
+    telemetry.component_trace('tok.chat_1', 'leave', 3, 'llm_a', t + 0.1, {'result': 'continue'}, pipeline)
+    telemetry.component_trace('tok.chat_1', 'enter', 3, 'llm_b', t + 0.11, {}, pipeline)
+    # starts within the tolerance of llm_a's end: the component id decides
+    early = _call('POST', t + 0.12, t + 0.13, component='llm_b')
+    model = {
+        'k': 'gen',
+        's': int((t + 0.115) * 1e9),
+        'e': int((t + 0.2) * 1e9),
+        'p': 3,
+        'c': 'llm_b',
+        'a': {'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': 'openai', 'gen_ai.request.model': 'gpt-4o'},
+        'r': [],
+    }
+    telemetry.dependency_relayed('tok.chat_1', {'calls': [early, model]}, pipeline)
+    telemetry.component_trace('tok.chat_1', 'leave', 3, 'llm_b', t + 0.3, {'result': 'continue'}, pipeline)
+    telemetry.component_trace('tok.chat_1', 'leave', 3, 'chat_1', t + 0.31, {'result': 'continue'}, pipeline)
+    assert telemetry.flush_traces(5)
+    telemetry._tracer_provider.force_flush()
+    finished = spans.get_finished_spans()
+    llm_b = next(s for s in finished if s.attributes.get('rocketride.component.id') == 'llm_b')
+    chat = next(s for s in finished if s.name == 'chat gpt-4o')
+    assert chat.parent.span_id == llm_b.context.span_id
+    (http,) = [s for s in finished if s.kind == SpanKind.CLIENT and s.name == 'POST']
+    assert http.parent.span_id == chat.context.span_id
+
+
+def test_a_pipeline_that_arrives_after_the_first_enter_still_names_the_components(sink):
+    telemetry, spans, _ = sink
+    _begin(telemetry)
+    t = time.time()
+    telemetry.component_trace('task-1', 'enter', 3, 'my_llm', t, {}, None)
+    telemetry.component_trace('task-1', 'leave', 3, 'my_llm', t + 0.1, {}, PIPELINE)
+    assert telemetry.flush_traces(5)
+    telemetry._tracer_provider.force_flush()
+    assert [s.name for s in spans.get_finished_spans() if s.name.startswith('component')] == ['component llm_openai']
+
+
+def test_a_call_started_outside_any_node_call_stays_unattributed(written):
+    context = relay._context()
+    token = context.attach(context.set_value(relay._SCOPE_KEY, relay._Scope(2, 'comp_b', 0xB)))
+    try:
+        now = time.time_ns()
+        relay.emit(_deps.Call('http.client.request.duration', 'POST', now, now, {}, None), None)
+    finally:
+        context.detach(token)
+    relay.flush()
+    (record,) = records(written)
+    assert 'p' not in record and 'c' not in record
+
+
+def test_a_retry_without_its_delay_is_dropped_and_the_trace_still_exports(sink):
+    telemetry, spans, _ = sink
+    _begin(telemetry)
+    t = time.time()
+    model = {
+        'k': 'gen',
+        's': int((t + 0.1) * 1e9),
+        'e': int((t + 0.4) * 1e9),
+        'p': 3,
+        'c': 'my_llm',
+        'a': {'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': 'openai', 'gen_ai.request.model': 'gpt-4o'},
+        'r': [
+            [int((t + 0.2) * 1e9), 'provider_rate_limited', None],
+            [int((t + 0.3) * 1e9), 'provider_rate_limited', 1.5],
+        ],
+    }
+    telemetry.component_trace('task-1', 'enter', 3, 'my_llm', t, {}, PIPELINE)
+    telemetry.dependency_relayed('task-1', {'calls': [model]}, PIPELINE)
+    telemetry.component_trace('task-1', 'leave', 3, 'my_llm', t + 0.5, {}, PIPELINE)
+    assert telemetry.flush_traces(5)
+    telemetry._tracer_provider.force_flush()
+    finished = spans.get_finished_spans()
+    (chat,) = [s for s in finished if s.name == 'chat gpt-4o']
+    assert [e.attributes['rocketride.retry.delay_s'] for e in chat.events] == [1.5]
+    assert [s.name for s in finished if s.name == 'pipeline'] == ['pipeline']
+
+
+def test_the_process_trace_budget_survives_many_runs_and_orgs():
+    from ai.common.telemetry._common import _SlowLimiter
+
+    limiter = _SlowLimiter(60)  # 60 a minute for the process
+    allowed = sum(limiter.allow(f'task-{i}', f'org-{i}') for i in range(10_100))
+    assert allowed == 60  # new runs and orgs never bring back a full process bucket
+
+
+def test_a_held_model_call_is_measured_when_its_run_is_evicted(sink, monkeypatch):
+    from ai.common.telemetry import _runs
+
+    telemetry, _, reader = sink
+    monkeypatch.setattr(_runs, 'MAX_LIVE_TASKS', 1)
+    _begin(telemetry, 'task-1')
+    t = time.time()
+    model = {
+        'k': 'gen',
+        's': int((t + 0.1) * 1e9),
+        'e': int((t + 0.4) * 1e9),
+        'p': 3,
+        'c': 'my_llm',
+        'a': {'gen_ai.operation.name': 'chat', 'gen_ai.provider.name': 'openai', 'gen_ai.request.model': 'gpt-4o'},
+        'r': [],
+    }
+    telemetry.component_trace('task-1', 'enter', 3, 'my_llm', t, {}, PIPELINE)
+    telemetry.dependency_relayed('task-1', {'calls': [model]}, PIPELINE)
+    _begin(telemetry, 'task-2')  # evicts task-1 with its pass open
+    (point,) = _points_of(reader, 'gen_ai.client.operation.duration')
+    assert point.count == 1
