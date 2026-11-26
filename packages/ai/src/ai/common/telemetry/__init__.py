@@ -65,7 +65,9 @@ Configuration (environment, or the engine's .env):
     RR_OTEL_INSTRUMENT              dependency calls traced and measured (EaaS's and, relayed,
                                     the nodes'): 'db,redis,http,aws,model' (default), 'none'
     RR_OTEL_COMPONENT_SPANS         component spans per pipeline trace (default 200, at most 1000)
-    RR_OTEL_ORG_ATTRIBUTE           'false' leaves the customer org id off metrics and spans
+    RR_OTEL_ORG_ATTRIBUTE           'true' puts the customer org id on metrics (default off:
+                                    up to RR_OTEL_ORG_CARDINALITY orgs times each metric's
+                                    series); spans and error lines always carry it
     RR_OTEL_ORG_CARDINALITY         distinct org ids this process attributes, across all
                                     metrics (default 2000; later ones are '_other')
     RR_OTEL_AUTO_INSTALL            'true' installs a missing SDK at startup (requirements.txt)

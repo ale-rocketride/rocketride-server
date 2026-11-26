@@ -536,8 +536,7 @@ class Telemetry:
             slow_request_exclude=environ.get('RR_OTEL_SLOW_REQUEST_EXCLUDE', 'rrext_cprofile_*'),
             slow_traces_per_minute=_float(environ, 'RR_OTEL_SLOW_TRACES_PER_MINUTE', 100.0),
             component_span_cap=int(_float(environ, 'RR_OTEL_COMPONENT_SPANS', 200)),
-            org_attribute=environ.get('RR_OTEL_ORG_ATTRIBUTE', 'true').strip().lower()
-            not in ('0', 'false', 'no', 'off'),
+            org_attribute=_truthy(environ.get('RR_OTEL_ORG_ATTRIBUTE')),
             org_cardinality=int(_float(environ, 'RR_OTEL_ORG_CARDINALITY', 2000)),
             stale_call_seconds=_float(environ, 'RR_OTEL_STALE_CALL_SECONDS', 0.0),
             stall_log_seconds=_float(environ, 'RR_OTEL_STALL_LOG_SECONDS', 900.0),
@@ -557,7 +556,7 @@ class Telemetry:
         slow_request_exclude: str = '',
         slow_traces_per_minute: float = 100.0,
         component_span_cap: int = 200,
-        org_attribute: bool = True,
+        org_attribute: bool = False,
         org_cardinality: int = 2000,
         stale_call_seconds: float = 0.0,
         stall_log_seconds: float = 900.0,
@@ -583,6 +582,8 @@ class Telemetry:
         # process, a tenth of it per org
         self._caller_limit = _SlowLimiter(CALLER_TRACES_PER_MINUTE)
         self._span_cap = min(MAX_COMPONENT_SPANS, max(0, component_span_cap))
+        # The org id on metrics (opt-in: up to RR_OTEL_ORG_CARDINALITY orgs times each
+        # metric's attribute sets); spans and error lines always carry it (no series)
         self._org_attribute = org_attribute
         self._org_cap = max(0, org_cardinality)
         # Off by default: the engine emits enter/leave in pairs, and the outermost
@@ -810,8 +811,27 @@ class Telemetry:
             pass
 
     def _org(self, org_id: Any) -> Optional[str]:
-        """The org id to attach, or None: off, unknown, or past the cardinality cap ('_other')."""
-        if not self._org_attribute or not org_id:
+        """The org id to attach to a metric, or None: off, unknown, or past the cardinality cap ('_other')."""
+        return self._capped_org(org_id) if self._org_attribute else None
+
+    @staticmethod
+    def _span_org(org_id: Any) -> Optional[str]:
+        """The org id on a span or an error line: always, uncapped (a span or a line makes no series)."""
+        return str(org_id)[:MAX_VALUE_LENGTH] if org_id else None
+
+    def _with_span_org(self, attributes: Dict[str, Any], org_id: Any) -> Dict[str, Any]:
+        org = self._span_org(org_id)
+        if org is not None:
+            attributes[ORG_KEY] = org
+        return attributes
+
+    def _capped_org(self, org_id: Any) -> Optional[str]:
+        """
+        The org id within the cardinality cap ('_other' past it), or None: the
+        metrics' org label, and the key of the per-customer bounds (projects,
+        servers) whether or not the label is on.
+        """
+        if not org_id:
             return None
         value = str(org_id)[:MAX_VALUE_LENGTH]
         with self._lock:
@@ -826,9 +846,9 @@ class Telemetry:
         return value
 
     def _with_org(self, attributes: Dict[str, Any], org_id: Any, project: Any = None) -> Dict[str, Any]:
-        """The org id (bounded), and with a project, its project id (MAX_PROJECTS_PER_ORG per org)."""
-        org = self._org(org_id)
-        if org is not None:
+        """A metric's org id (bounded, when on), and with a project, its project id (MAX_PROJECTS_PER_ORG per org)."""
+        org = self._capped_org(org_id)
+        if org is not None and self._org_attribute:
             attributes[ORG_KEY] = org
         if project:
             attributes[PROJECT_KEY] = self._bounded_project(org or '', str(project)[:MAX_VALUE_LENGTH])
@@ -1220,7 +1240,7 @@ class Telemetry:
                     'task',
                     kind=SpanKind.INTERNAL,
                     start_time=_ns(run.begin_wall),
-                    attributes=self._with_org(
+                    attributes=self._with_span_org(
                         {
                             'rocketride.task.id': task_id,
                             'rocketride.task.run_kind': run_kind,
@@ -1280,7 +1300,7 @@ class Telemetry:
             if exit_signal:
                 line['exit_signal'] = exit_signal
                 line['oom_suspected'] = oom_suspected
-            org = self._org(org_id)
+            org = self._span_org(org_id)
             if org:
                 line['org_id'] = org
             sys.stdout.write(json.dumps(line) + '\n')
@@ -1405,8 +1425,8 @@ class Telemetry:
             )
 
         span_attributes = dict(attributes)
-        if org and self._org(org):
-            span_attributes[ORG_KEY] = self._org(org)
+        if org:
+            span_attributes[ORG_KEY] = self._span_org(org)
         if identity.get('connection_id'):
             span_attributes['rocketride.connection.id'] = str(identity['connection_id'])[:MAX_VALUE_LENGTH]
         links = []
@@ -1830,7 +1850,7 @@ class Telemetry:
         histogram = self._dependency.get(name)
         if histogram is None:
             return
-        org = self._org(attributes.get('_org')) or ''  # who made the call (relayed, bounded): never a label
+        org = self._capped_org(attributes.get('_org')) or ''  # who made the call (relayed, bounded)
         component_type = attributes.get('_component')
         exemplar = None  # dependency calls: no exemplar (see _relayed)
         # url.template stays on the call's span: as a label it would multiply each
@@ -1853,7 +1873,7 @@ class Telemetry:
                 'error.type': self._bounded_error_type(values['error.type'], 'dependency'),
                 'server.address': values.get('server.address') or '_unknown',
             }
-            if org:
+            if org and self._org_attribute:
                 failed[ORG_KEY] = org
             if attributes.get('_project'):
                 failed[PROJECT_KEY] = self._bounded_project(org, str(attributes['_project']))
@@ -2096,7 +2116,7 @@ class Telemetry:
         server = (calls[0][4] or {}).get('server.address')
         if not server:
             return None
-        return self._bounded_pipeline_server(self._org(run.org) or '', str(server)[:MAX_VALUE_LENGTH])
+        return self._bounded_pipeline_server(self._capped_org(run.org) or '', str(server)[:MAX_VALUE_LENGTH])
 
     def _source_type_locked(self, task_id: str, pipeline: Mapping[str, Any]) -> str:
         """The run's source component type (its provider), bounded like component types; under the lock."""
@@ -2269,7 +2289,7 @@ class Telemetry:
         project: str = '',
         why: str = '',
     ) -> None:
-        attributes = self._with_org(
+        attributes = self._with_span_org(
             {
                 'rocketride.task.id': task_id,
                 'rocketride.task.run_kind': run_kind,
@@ -2496,7 +2516,7 @@ class Telemetry:
             for key in ('task_id', 'connection_id'):
                 if identity.get(key):
                     line[key] = str(identity[key])[:MAX_VALUE_LENGTH]
-            org = self._org(identity.get('org_id'))
+            org = self._span_org(identity.get('org_id'))
             if org:
                 line['org_id'] = org
             sys.stdout.write(json.dumps(line) + '\n')
@@ -2593,7 +2613,7 @@ class Telemetry:
             }
             if project:
                 line['project_id'] = project
-            org = self._org(org_id)
+            org = self._span_org(org_id)
             if org:
                 line['org_id'] = org
             sys.stdout.write(json.dumps(line) + '\n')

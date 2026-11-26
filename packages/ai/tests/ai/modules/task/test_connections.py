@@ -52,7 +52,7 @@ OPEN = [
 @pytest.fixture
 def otel(monkeypatch):
     reader = InMemoryMetricReader()
-    impl = Telemetry(metric_reader=reader, service_version='9.9.9')
+    impl = Telemetry(metric_reader=reader, service_version='9.9.9', org_attribute=True)
     monkeypatch.setattr(facade, '_impl', impl)
     for instrument in (
         connections.CONNECTIONS,
@@ -135,6 +135,7 @@ def test_how_long_connections_stayed_open(otel):
 
 def _capped(monkeypatch, org_cardinality, **kwargs):
     reader = InMemoryMetricReader()
+    kwargs.setdefault('org_attribute', True)
     impl = Telemetry(metric_reader=reader, service_version='9.9.9', org_cardinality=org_cardinality, **kwargs)
     monkeypatch.setattr(facade, '_impl', impl)
     for instrument in (connections.CONNECTIONS, connections.USERS, connections.USERS_ALL, connections.DISCONNECTS):

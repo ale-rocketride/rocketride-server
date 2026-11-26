@@ -186,7 +186,9 @@ def test_a_library_span_named_after_its_database_is_named_from_its_attributes(wr
 def sink():
     spans = InMemorySpanExporter()
     reader = InMemoryMetricReader()
-    telemetry = Telemetry(span_exporter=spans, metric_reader=reader, sample_ratio=1.0, service_version='9.9.9')
+    telemetry = Telemetry(
+        span_exporter=spans, metric_reader=reader, sample_ratio=1.0, service_version='9.9.9', org_attribute=True
+    )
     yield telemetry, spans, reader
     telemetry.shutdown(1)
 

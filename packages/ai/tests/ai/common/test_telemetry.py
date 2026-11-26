@@ -59,6 +59,7 @@ def identity():
 
 
 def make(**kwargs):
+    kwargs.setdefault('org_attribute', True)  # the per-customer metrics (off by default)
     spans = InMemorySpanExporter()
     reader = InMemoryMetricReader()
     telemetry = Telemetry(span_exporter=spans, metric_reader=reader, service_version='9.9.9', **kwargs)
@@ -839,6 +840,41 @@ def test_org_cardinality_cap_and_switch():
     telemetry, _, reader = make(org_attribute=False)
     telemetry.task_ended('t', {'org_id': 'org-a', 'run_kind': 'dev'}, 'ok', None, None)
     assert all('rocketride.org.id' not in attrs for attrs, _ in points(reader)['rocketride.task.ended'])
+    telemetry.shutdown(1)
+
+
+def test_the_org_id_is_on_spans_and_lines_always_and_on_metrics_only_when_asked(monkeypatch, capsys):
+    built = []
+    with monkeypatch.context() as patched:
+        patched.setattr(_otel, '_check_transport', lambda environ: '')
+        patched.setattr(Telemetry, '__init__', lambda self, **kwargs: built.append(kwargs['org_attribute']))
+        Telemetry.from_environment(environ={})
+        Telemetry.from_environment(environ={'RR_OTEL_ORG_ATTRIBUTE': 'true'})
+    assert built == [False, True]  # off on metrics unless asked
+
+    telemetry, spans, reader = make(org_attribute=False, org_cardinality=1)
+    for n in range(2):
+        identity = {'org_id': f'org-{n}', 'run_kind': 'dev'}
+        for event in (
+            {'event': 'apaevt_status_update', 'body': {'state': 1}},
+            {'event': 'apaevt_task', 'body': {'action': 'begin', 'name': 'x'}},
+            {'event': 'apaevt_status_update', 'body': {'state': 3}},
+        ):
+            telemetry.task_event(f't{n}', event, lambda i=identity: i)
+        telemetry.task_ended(f't{n}', identity, 'error', 'start_error', None)
+    telemetry.request_done(
+        'execute', None, 0.05, f'00-{PARENT_TRACE}-b7ad6b7169203331-01', identity={'org_id': 'org-1'}
+    )
+    collected = points(reader)
+    for name, entries in collected.items():
+        assert all('rocketride.org.id' not in attrs for attrs, _ in entries), name
+    assert telemetry.attributed_orgs() == frozenset()
+    kept = finished(telemetry, spans)
+    # spans: every org, uncapped (a span makes no series)
+    assert {s.attributes.get('rocketride.org.id') for s in kept if s.name == 'task'} == {'org-0', 'org-1'}
+    assert [s.attributes['rocketride.org.id'] for s in kept if s.name == 'execute'] == ['org-1']
+    lines = [json.loads(x) for x in capsys.readouterr().out.splitlines() if 'rocketride.task.ended' in x]
+    assert {line['org_id'] for line in lines} == {'org-0', 'org-1'}
     telemetry.shutdown(1)
 
 

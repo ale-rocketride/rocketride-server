@@ -69,7 +69,7 @@ apply. The `RR_OTEL_*` variables exist only for what has no standard.
 | `RR_OTEL_SLOW_REQUEST_EXCLUDE` | `rrext_cprofile_*` | Request names (shell patterns, comma-separated) that are slow by design and never kept for being slow |
 | `RR_OTEL_SLOW_TRACES_PER_MINUTE` | `100` | Most slow traces kept per minute by the process; one run, or one org, gets at most a tenth of it (at least 1). The rest are counted in `rocketride.telemetry.dropped` as `slow_rate_limited`. Failed traces are never limited |
 | `RR_OTEL_COMPONENT_SPANS` | `200` | Maximum component spans per pipeline trace (`0`: none; at most `1000`) |
-| `RR_OTEL_ORG_ATTRIBUTE` | `true` | `false` leaves the org id off metrics and spans |
+| `RR_OTEL_ORG_ATTRIBUTE` | `false` | `true` puts the org id (`rocketride.org.id`) on metrics, for per-customer metrics. Each metric that carries it then has up to `RR_OTEL_ORG_CARDINALITY` (+1 for `_other`) times the series it has without it; plan the metrics backend's series limit for that. Spans and error log lines always carry the org id (they add no series) |
 | `RR_OTEL_ORG_CARDINALITY` | `2000` | Distinct org ids the process attributes, across all metrics; later ones are `_other` (counted in `rocketride.telemetry.dropped`) |
 | `RR_OTEL_AUTO_INSTALL` | off | `true` installs a missing SDK at startup, in the background (see above) |
 | `RR_OTEL_SHUTDOWN_TIMEOUT` | `3` | Seconds a shutdown may wait to flush |
@@ -147,10 +147,20 @@ Names and units follow the [OpenTelemetry semantic conventions](https://opentele
 RocketRide-specific attributes are namespaced `rocketride.*`.
 
 No label carries a user, email, project name, task name, file name or payload. The
-customer identifiers are the opaque org id (`rocketride.org.id`), which you can turn
-off, and on the per-customer metrics the opaque id of the pipeline's project
+customer identifiers are the opaque org id (`rocketride.org.id`) and, on the
+per-customer metrics, the opaque id of the pipeline's project
 (`rocketride.project.id`: the same for every run of that pipeline; at most 50 per
-customer, then `_other`). A Prometheus-compatible backend shows `rocketride.task.ended` as
+customer, then `_other`).
+
+**Per-customer metrics.** Spans and error log lines always carry the org id. On
+metrics it is opt-in: set `RR_OTEL_ORG_ATTRIBUTE=true` and the metrics the tables
+below list with `rocketride.org.id` carry it. Each such metric then has up to
+`RR_OTEL_ORG_CARDINALITY` orgs (default 2000, plus `_other`) times the attribute
+sets it has without the org id: with 2000 orgs, a metric with 30 label
+combinations can reach about 60,000 series in each server process. Off (the
+default), each of those metrics adds up all customers together.
+
+A Prometheus-compatible backend shows `rocketride.task.ended` as
 `rocketride_task_ended_total` and `rocketride.task.duration` as
 `rocketride_task_duration_seconds`.
 

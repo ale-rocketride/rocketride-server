@@ -38,7 +38,12 @@ def sink():
     spans = InMemorySpanExporter()
     reader = InMemoryMetricReader()
     telemetry = Telemetry(
-        span_exporter=spans, metric_reader=reader, sample_ratio=1.0, slow_request_seconds=2.0, service_version='9.9.9'
+        span_exporter=spans,
+        metric_reader=reader,
+        sample_ratio=1.0,
+        slow_request_seconds=2.0,
+        service_version='9.9.9',
+        org_attribute=True,
     )
     recorder = _deps.SqlRecorder(telemetry._dependency_call_hook)
     recorder.install()
