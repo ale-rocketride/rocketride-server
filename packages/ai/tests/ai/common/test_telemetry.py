@@ -978,6 +978,21 @@ def test_no_span_without_a_sampled_valid_traceparent(sink, traceparent):
     assert value(points(reader), 'rpc.server.call.duration', rpc__method='execute').count == 1
 
 
+def test_caller_sampled_requests_are_limited_per_org(sink):
+    telemetry, spans, reader = sink
+    sampled = f'00-{PARENT_TRACE}-b7ad6b7169203331-01'
+    for _ in range(11):  # one org, within a minute: 10 kept for the caller's trace
+        telemetry.request_done('execute', None, 0.05, sampled, identity={'org_id': 'org-a'})
+    telemetry.request_done('execute', None, 0.05, sampled, identity={'org_id': 'org-b'})  # its own budget
+    kept = [s for s in finished(telemetry, spans) if s.name == 'execute']
+    assert len(kept) == 11
+    assert all(s.attributes['rocketride.sampling.reason'] == 'ratio' for s in kept)
+    assert [s.attributes.get('rocketride.org.id') for s in kept].count('org-b') == 1
+    dropped = value(points(reader), 'rocketride.telemetry.dropped', rocketride__telemetry__reason='caller_rate_limited')
+    assert dropped.value == 1
+    assert format(kept[0].context.trace_id, '032x') == PARENT_TRACE  # still the caller's trace
+
+
 # ── Stalled passes ────────────────────────────────────────────────────────────
 
 

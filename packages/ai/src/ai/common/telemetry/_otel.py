@@ -213,6 +213,8 @@ MATCH_TOLERANCE = 0.05  # seconds: a relayed call's clock vs the engine events' 
 MAX_PENDING_MEASUREMENTS = 100_000  # dependency calls waiting to be recorded (otel-deps thread)
 MEASURE_INTERVAL = 1.0  # seconds between recordings of the dependency calls
 MAX_COMPONENT_SPANS = 1000  # ceiling for RR_OTEL_COMPONENT_SPANS
+# Requests kept only because their caller sampled its trace: per process (a tenth per org)
+CALLER_TRACES_PER_MINUTE = 100.0
 
 # Why telemetry was dropped to stay within its bounds (rocketride.telemetry.dropped)
 DROP_REASONS = (
@@ -244,6 +246,7 @@ DROP_REASONS = (
     'info_overflow',  # an info gauge (telemetry.InfoGauge) past its observations per collection
     'model_overflow',  # a provider's model past MAX_MODELS_PER_PROVIDER on the metrics: '_other'
     'project_overflow',  # a customer's project past MAX_PROJECTS_PER_ORG on the metrics: '_other'
+    'caller_rate_limited',  # a request kept for its caller's sampled trace, past CALLER_TRACES_PER_MINUTE
 )
 
 ORG_KEY = 'rocketride.org.id'
@@ -547,6 +550,10 @@ class Telemetry:
         self._slow_exclude = [p.strip() for p in slow_request_exclude.split(',') if p.strip()]
         self._slow_limit = _SlowLimiter(slow_traces_per_minute)
         self._dependency_error_limit = _SlowLimiter(slow_traces_per_minute)
+        # A caller's sampled traceparent keeps the request's span in the caller's
+        # trace, but a caller cannot choose how many: CALLER_TRACES_PER_MINUTE per
+        # process, a tenth of it per org
+        self._caller_limit = _SlowLimiter(CALLER_TRACES_PER_MINUTE)
         self._span_cap = min(MAX_COMPONENT_SPANS, max(0, component_span_cap))
         self._org_attribute = org_attribute
         self._org_cap = max(0, org_cardinality)
@@ -1350,7 +1357,10 @@ class Telemetry:
         if not keep and slow and (request is not None or parent is not None) and self._slow_allowed('', ''):
             keep = 'slow'
         if not keep and parent is not None and self._keep_success():
-            keep = 'ratio'
+            if self._caller_limit.allow('', str(identity.get('org_id') or '')[:MAX_VALUE_LENGTH]):
+                keep = 'ratio'
+            else:
+                self.count_dropped('caller_rate_limited')
 
         # Measured whatever the sampling; the exemplar names the request's span when it is kept
         exemplar = _exemplar(request.trace_id, request.span_id, bool(keep)) if request is not None else None
