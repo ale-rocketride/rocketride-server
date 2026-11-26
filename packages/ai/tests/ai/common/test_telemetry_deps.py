@@ -880,3 +880,109 @@ def test_retrying_missing_instrumentations_installs_no_recorder_twice(monkeypatc
     _deps.instrument(None, ['db'], lambda call: None)
     assert _deps.instrument_missing() == ([], [])
     assert installs == [1]
+
+
+# ── Model server requests (ModelClient calls telemetry.model_server_call) ─────
+
+
+@pytest.fixture
+def model_client(monkeypatch):
+    """A ModelClient without a server: its request is `request` (a coroutine function), run on a loop thread."""
+    from ai import node as ai_node
+    from ai.common.models.base import ModelClient
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(ai_node, 'server_loop', loop, raising=False)
+    client = ModelClient.__new__(ModelClient)
+    client._uri = 'ws://model-server:5590'
+    try:
+        yield client
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(5)
+        loop.close()
+        telemetry_module._model_recorder = None
+
+
+def test_a_model_server_request_is_recorded_in_the_pass_trace(model_client):
+    from rocketride.core.dap_base import current_traceparent
+
+    async def request(command, arguments, retry_on_error):
+        return {'traceparent': current_traceparent()}
+
+    model_client._send_command_async = request
+    calls = []
+    trace_id = int('4bf92f3577b34da6a3ce929d0e0e4736', 16)
+    recorder = _deps.ModelRecorder(calls.append, lambda: trace_id)
+    assert recorder.install()
+    assert not recorder.install()  # once
+    body = model_client.send_command('rrext_ms_inference', {})
+    (call,) = calls
+    assert call.metric == 'rpc.client.call.duration'
+    assert call.name == 'model rrext_ms_inference'
+    assert call.attributes == {
+        'rpc.system.name': 'rocketride_dap',
+        'rpc.method': 'rrext_ms_inference',
+        'server.address': 'model-server',
+    }
+    assert call.error_type is None and call.end_ns >= call.start_ns
+    # The request carried the pass's trace and the call's own span id
+    assert body['traceparent'] == f'00-{trace_id:032x}-{call.span_id:016x}-01'
+
+    async def failing(command, arguments, retry_on_error):
+        raise ConnectionError('gone')
+
+    model_client._send_command_async = failing
+    with pytest.raises(ConnectionError):
+        model_client.send_command('not a method!', {})
+    assert calls[1].error_type == 'ConnectionError'
+    assert calls[1].attributes['rpc.method'] == '_OTHER'
+
+    recorder.uninstall()
+    model_client._send_command_async = request
+    model_client.send_command('rrext_ms_inference', {})
+    assert len(calls) == 2  # off again
+
+
+def test_a_model_request_out_of_a_pass_has_no_traceparent(model_client):
+    from rocketride.core.dap_base import current_traceparent
+
+    async def request(command, arguments, retry_on_error):
+        return {'traceparent': current_traceparent()}
+
+    model_client._send_command_async = request
+    calls = []
+    _deps.ModelRecorder(calls.append).install()
+    body = model_client.send_command('rrext_ms_inference', {})
+    assert calls[0].span_id == 0 and calls[0].error_type is None
+    assert not body['traceparent']
+
+
+def test_with_telemetry_off_a_model_request_is_left_alone(model_client):
+    async def request(command, arguments, retry_on_error):
+        return {'ok': True}
+
+    model_client._send_command_async = request
+    assert telemetry_module._model_recorder is None
+    call = telemetry_module.model_server_call(model_client, 'rrext_ms_inference')
+    assert call is telemetry_module._NO_MODEL_CALL
+    coroutine = request('x', {}, True)
+    assert call.traced(coroutine) is coroutine  # not wrapped
+    coroutine.close()
+    assert model_client.send_command('rrext_ms_inference', {}) == {'ok': True}
+
+
+def test_the_model_flag_turns_the_model_recorder_on_and_off():
+    try:
+        _deps.instrument(None, [], lambda call: None)
+        assert telemetry_module._model_recorder is None
+        done, _skipped, recorders = _deps.instrument(None, ['model'], lambda call: None)
+        assert 'ai.common.models' in done
+        assert telemetry_module._model_recorder in recorders
+    finally:
+        for recorder in _deps._STATE.get('recorders', []):
+            recorder.uninstall()
+        _deps._STATE.clear()
+    assert telemetry_module._model_recorder is None

@@ -535,17 +535,94 @@ def test_a_driver_a_node_installs_with_depends_is_recorded_right_after(monkeypat
 
     installed = []
     module = types.ModuleType('depends')
-    module.depends = lambda requirements=None: installed.append(requirements)
+    module.after_install_hooks = []
+
+    def depends(requirements=None):  # as depends.depends: the hooks run after the install
+        installed.append(requirements)
+        for hook in module.after_install_hooks:
+            hook(requirements)
+
+    module.depends = depends
     monkeypatch.setitem(sys.modules, 'depends', module)
     recorded = []
     monkeypatch.setattr(_deps, 'instrument_new', lambda: recorded.append(list(installed)) or [])
     relay._watch_depends()
     relay._watch_depends()  # once
-    from depends import depends  # what a node does: the wrapped one
+    assert module.after_install_hooks == [relay._depends_installed]
+    assert module.depends is depends  # not replaced
 
     depends('nodes/store_qdrant/requirements.txt')
     assert installed == ['nodes/store_qdrant/requirements.txt']
     assert recorded == [['nodes/store_qdrant/requirements.txt']]  # after the install, once
+
+
+def test_node_classes_defined_before_install_are_named_in_one_warning(monkeypatch):
+    import rocketlib
+
+    class Base:
+        def writeText(self, text):
+            pass
+
+    class Early(Base):
+        def writeText(self, text):
+            pass
+
+    class EarlyChild(Early):  # found at any depth
+        def writeText(self, text):
+            pass
+
+    class Plain(Base):  # no handler of its own: nothing to wrap
+        pass
+
+    class GlobalBase:
+        def beginGlobal(self):
+            pass
+
+    class EarlyGlobal(GlobalBase):
+        def beginGlobal(self):
+            pass
+
+    class Others(GlobalBase):  # not a global handler
+        def helper(self):
+            pass
+
+    warnings = []
+    monkeypatch.setattr(rocketlib, 'warning', warnings.append)
+    monkeypatch.setattr(relay, 'untraced_classes', 0)
+    count = relay._warn_untraced([(Base, None), (GlobalBase, relay.GLOBAL_HANDLERS)])
+    assert count == 3 and relay.untraced_classes == 3
+    (line,) = warnings
+    assert line.startswith('telemetry: 3 node classes defined before telemetry started are not traced: ')
+    for cls in (Early, EarlyChild, EarlyGlobal):
+        assert cls.__qualname__ in line
+    assert 'Plain' not in line and 'Others' not in line
+
+    # Classes defined after the wrapping are traced, not warned about
+    relay._wrap_subclasses(Base)
+
+    class Late(Base):
+        def writeText(self, text):
+            pass
+
+    warnings.clear()
+    relay._warn_untraced([(Base, None)])
+    assert 'Late' not in warnings[0] and 'Early' in warnings[0]
+
+
+def test_the_untraced_warning_names_at_most_ten_classes(monkeypatch):
+    import rocketlib
+
+    class Base:
+        def writeText(self, text):
+            pass
+
+    classes = [type(f'Node{i}', (Base,), {'writeText': lambda self, text: None}) for i in range(12)]
+    warnings = []
+    monkeypatch.setattr(rocketlib, 'warning', warnings.append)
+    assert relay._warn_untraced([(Base, None)]) == 12
+    assert warnings[0].count('Node') == relay.MAX_UNTRACED_NAMES
+    assert warnings[0].endswith('(+2 more)')
+    assert len(classes) == 12
 
 
 def test_a_failed_relayed_call_is_counted_by_node_server_error_and_customer(sink):

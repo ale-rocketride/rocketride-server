@@ -37,8 +37,11 @@ EaaS measures it and attaches it to the pass and component that made it
 
 The component is the node instance the engine is calling into: every
 IInstanceBase subclass's handlers are wrapped to make (pipe, component id)
-current for the call. A call made on a thread or event loop the node started
-itself has no component; EaaS still measures it.
+current for the call. The wrapping is done when the class is defined, so only
+classes defined after install() get it (ai/node.py installs before loading any
+node); one defined earlier is named in a warning and its calls carry no
+component. A call made on a thread or event loop the node started itself has
+no component; EaaS still measures it.
 
 What is written: the call's name, times, error type and a few bounded
 attributes (system, operation, server, method, status, scheme). Never a URL, a
@@ -151,6 +154,7 @@ def install(argv: Sequence[str] = sys.argv) -> List[str]:
 
         _write = functools.partial(monitorOther, 'SPN')
         _context()
+        _warn_untraced([(IInstanceBase, None), (IGlobalBase, GLOBAL_HANDLERS)])
         _wrap_subclasses(IInstanceBase)
         try:
             _wrap_subclasses(IGlobalBase, _scoped_global, GLOBAL_HANDLERS)
@@ -176,29 +180,22 @@ def install(argv: Sequence[str] = sys.argv) -> List[str]:
 
 
 def _watch_depends() -> None:
-    """A node installs its driver with depends() and imports it after: record it right then."""
+    """A node installs its driver with depends() and imports it after: record it right then (depends' hook)."""
     try:
         import depends as module  # type: ignore
 
-        from . import _deps
-
-        original = module.depends
-        if getattr(original, '__relay_watched__', False):
-            return
-
-        @functools.wraps(original)
-        def depends(*args, **kwargs):
-            result = original(*args, **kwargs)
-            try:
-                _deps.instrument_new()
-            except Exception:
-                pass
-            return result
-
-        depends.__relay_watched__ = True
-        module.depends = depends
+        hooks = module.after_install_hooks
+        if _depends_installed not in hooks:
+            hooks.append(_depends_installed)
     except Exception:
         pass
+
+
+def _depends_installed(_requirements: Optional[str]) -> None:
+    """depends() finished an install: record the libraries that became importable."""
+    from . import _deps
+
+    _deps.instrument_new()
 
 
 def _propagate_to_threads() -> None:
@@ -216,11 +213,68 @@ def _propagate_to_threads() -> None:
 GLOBAL_HANDLERS = ('validateConfig', 'beginGlobal', 'endGlobal')  # a node's global calls (key checks)
 
 
+MAX_UNTRACED_NAMES = 10  # class names in the warning about node classes defined before install()
+# Node classes that existed before install(): their handlers are not wrapped (no component on their calls)
+untraced_classes = 0
+
+
+def _handlers(base: Any, handlers: Optional[Sequence[str]]) -> Sequence[str]:
+    """The handler names _wrap_subclasses wraps on base's subclasses: the given ones, else base's public methods."""
+    if handlers is not None:
+        return handlers
+    return [name for name, value in vars(base).items() if callable(value) and not name.startswith('_')]
+
+
+def _existing_subclasses(base: Any) -> List[Any]:
+    """Every subclass of base defined so far, at any depth, once."""
+    found: List[Any] = []
+    stack = list(base.__subclasses__())
+    while stack:
+        cls = stack.pop()
+        if cls in found:
+            continue
+        found.append(cls)
+        stack.extend(cls.__subclasses__())
+    return found
+
+
+def _warn_untraced(bases: Sequence[Tuple[Any, Optional[Sequence[str]]]]) -> int:
+    """
+    Node classes defined before install() keep their handlers unwrapped (only
+    classes defined later are): their calls are measured but not placed on
+    their component. Counted (untraced_classes) and named in one warning line.
+    """
+    global untraced_classes
+    try:
+        names: List[str] = []
+        for base, handlers in bases:
+            wanted = _handlers(base, handlers)
+            for cls in _existing_subclasses(base):
+                if any(
+                    callable(cls.__dict__.get(name)) and not getattr(cls.__dict__[name], '__relay_scoped__', False)
+                    for name in wanted
+                ):
+                    label = f'{cls.__module__}.{cls.__qualname__}'
+                    if label not in names:
+                        names.append(label)
+        untraced_classes = len(names)
+        if names:
+            shown = ', '.join(names[:MAX_UNTRACED_NAMES])
+            more = f' (+{len(names) - MAX_UNTRACED_NAMES} more)' if len(names) > MAX_UNTRACED_NAMES else ''
+            from rocketlib import warning
+
+            warning(
+                f'telemetry: {len(names)} node classes defined before telemetry started are not traced: {shown}{more}'
+            )
+        return len(names)
+    except Exception:
+        return 0
+
+
 def _wrap_subclasses(base: Any, scoped: Optional[Callable] = None, handlers: Optional[Sequence[str]] = None) -> None:
     """Make every node's handlers set (pipe, component) for their call, now and for classes defined later."""
     scoped = scoped or _scoped
-    if handlers is None:
-        handlers = [name for name, value in vars(base).items() if callable(value) and not name.startswith('_')]
+    handlers = _handlers(base, handlers)
     own = vars(base).get('__init_subclass__')
     original = own.__func__ if own is not None else None
 

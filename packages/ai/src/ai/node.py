@@ -456,7 +456,11 @@ def run():
     install_gpu_guard()
 
     # Telemetry: relay the nodes' dependency calls to EaaS when it asked for it
-    # (--otel_relay); before any node class is defined
+    # (--otel_relay). Must run before any node class is defined: install() wraps
+    # the handlers of IInstanceBase/IGlobalBase subclasses defined after it (their
+    # calls carry the node's component); a class defined earlier is not wrapped
+    # and is named in a warning. It also registers a depends() after-install
+    # hook. A no-op without --otel_relay (telemetry off).
     try:
         from ai.common.telemetry import relay
 

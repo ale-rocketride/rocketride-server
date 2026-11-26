@@ -769,6 +769,51 @@ def timed(histogram: Histogram, **attributes: Any) -> Iterator[Dict[str, Any]]:
         histogram.record(time.monotonic() - started, **{**attributes, **extra})
 
 
+# ── Model server requests (ModelClient calls this) ─────────────────────────────
+
+
+class _NoModelCall:
+    """model_server_call() with the 'model' recorder off: nothing timed, the coroutine as it is."""
+
+    __slots__ = ()
+
+    def __enter__(self) -> '_NoModelCall':
+        return self
+
+    def __exit__(self, kind: Any, value: Any, traceback: Any) -> bool:
+        return False
+
+    def traced(self, coroutine: Any) -> Any:
+        return coroutine
+
+
+_NO_MODEL_CALL = _NoModelCall()
+# Set by _deps.ModelRecorder.install() (RR_OTEL_INSTRUMENT 'model', or the relay's
+# --otel_relay=...,model), cleared by its uninstall(); None while off
+_model_recorder: Any = None
+
+
+def model_server_call(client: Any, command: str) -> Any:
+    """
+    Time one model server request a ModelClient makes, as `with`; a no-op while off.
+
+        with telemetry.model_server_call(self, command) as call:
+            future = run_coroutine_threadsafe(call.traced(self._request(...)), loop)
+            body = future.result()
+
+    call.traced(coroutine) runs the request in the call's trace (its traceparent
+    names the pipeline pass, the model server's span is the call's child). An
+    exception goes on; its class is the call's error type.
+    """
+    recorder = _model_recorder
+    if recorder is None:
+        return _NO_MODEL_CALL
+    try:
+        return recorder.call(client, command)
+    except Exception:
+        return _NO_MODEL_CALL  # a model call never fails for telemetry
+
+
 # ── SDK logging during a collector outage ─────────────────────────────────────
 
 
@@ -827,7 +872,8 @@ def _quiet_sdk_logging() -> None:
 
 def _reset_for_tests() -> None:
     """Forget the running implementation (tests only)."""
-    global _impl, _starting, _closed, _connections
+    global _impl, _starting, _closed, _connections, _model_recorder
+    _model_recorder = None
     with _state_lock:
         _impl = None
         _starting = False

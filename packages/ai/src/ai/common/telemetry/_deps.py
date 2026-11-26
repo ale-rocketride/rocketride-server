@@ -434,6 +434,8 @@ class ModelRecorder:
     """
     Times every model server request a ModelClient makes (a node's GPU inference) into a Call.
 
+    ModelClient.send_command calls telemetry.model_server_call() around each
+    request; install() makes this recorder the one it uses (no-op otherwise).
     The synchronous send_command is timed, on the node's thread (it hands the
     request to the subprocess's event loop and waits): the latency as the
     pipeline sees it, retries included, and the node's component is current.
@@ -447,57 +449,33 @@ class ModelRecorder:
     def __init__(self, on_call: Callable[[Call], None], pass_trace_id: Optional[Callable[[], int]] = None) -> None:
         self._on_call = on_call
         self._pass_trace_id = pass_trace_id
-        self._originals: List[Tuple[Any, str, Any]] = []
-        self._local = threading.local()
+        self._installed = False
 
     def install(self) -> bool:
-        if self._originals:
+        if self._installed:
             return False
         try:
             from opentelemetry import context, trace  # noqa: F401 (_in_trace sets the traceparent with them)
         except ImportError:
             return False  # a model call must never fail for telemetry: not instrumented
-        from ai.common.models.base import ModelClient
+        from ai.common import telemetry
 
-        original = ModelClient.__dict__['send_command']
-        original_async = ModelClient.__dict__['_send_command_async']
-        recorder = self
-        local = self._local
-
-        def wrapper(client, command, *args, **kwargs):
-            trace_id = recorder._pass_trace_id() if recorder._pass_trace_id else 0
-            span_id = (random.getrandbits(64) or 1) if trace_id else 0
-            local.ids = (trace_id, span_id) if trace_id else None
-            started = time.time_ns()
-            try:
-                result = original(client, command, *args, **kwargs)
-            except Exception as e:
-                recorder._record(client, command, started, type(e).__name__, span_id)
-                raise
-            finally:
-                local.ids = None
-            recorder._record(client, command, started, None, span_id)
-            return result
-
-        def wrapper_async(client, *args, **kwargs):
-            # Called on the node's thread (send_command builds the coroutine there,
-            # then runs it on the event loop): the ids go with the coroutine
-            coroutine = original_async(client, *args, **kwargs)
-            ids = getattr(local, 'ids', None)
-            return _in_trace(coroutine, *ids) if ids else coroutine
-
-        wrapper.__wrapped__ = original
-        wrapper_async.__wrapped__ = original_async
-        self._originals.append((ModelClient, 'send_command', original))
-        self._originals.append((ModelClient, '_send_command_async', original_async))
-        ModelClient.send_command = wrapper
-        ModelClient._send_command_async = wrapper_async
+        telemetry._model_recorder = self
+        self._installed = True
         return True
 
     def uninstall(self) -> None:
-        for cls, name, original in self._originals:
-            setattr(cls, name, original)
-        self._originals = []
+        from ai.common import telemetry
+
+        if telemetry._model_recorder is self:
+            telemetry._model_recorder = None
+        self._installed = False
+
+    def call(self, client: Any, command: Any) -> '_ModelCall':
+        """One request (telemetry.model_server_call): ids taken now, on the node's thread."""
+        trace_id = self._pass_trace_id() if self._pass_trace_id else 0
+        span_id = (random.getrandbits(64) or 1) if trace_id else 0
+        return _ModelCall(self, client, command, trace_id, span_id)
 
     def _record(self, client: Any, command: Any, started: int, error_type: Optional[str], span_id: int) -> None:
         try:
@@ -512,6 +490,32 @@ class ModelRecorder:
             )
         except Exception:
             pass
+
+
+class _ModelCall:
+    """One model server request, as `with` (ModelRecorder.call); an Exception is the call's error type."""
+
+    __slots__ = ('_recorder', '_client', '_command', '_trace_id', '_span_id', '_started')
+
+    def __init__(self, recorder: ModelRecorder, client: Any, command: Any, trace_id: int, span_id: int) -> None:
+        self._recorder, self._client, self._command = recorder, client, command
+        self._trace_id, self._span_id = trace_id, span_id
+        self._started = 0
+
+    def __enter__(self) -> '_ModelCall':
+        self._started = time.time_ns()
+        return self
+
+    def __exit__(self, kind: Any, value: Any, traceback: Any) -> bool:
+        if kind is None:
+            self._recorder._record(self._client, self._command, self._started, None, self._span_id)
+        elif issubclass(kind, Exception):
+            self._recorder._record(self._client, self._command, self._started, kind.__name__, self._span_id)
+        return False
+
+    def traced(self, coroutine: Any) -> Any:
+        """The request's coroutine, run in the pass's trace with this call's span id (its traceparent)."""
+        return _in_trace(coroutine, self._trace_id, self._span_id) if self._trace_id else coroutine
 
 
 async def _in_trace(coroutine: Any, trace_id: int, span_id: int) -> Any:
