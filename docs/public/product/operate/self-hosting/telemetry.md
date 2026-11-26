@@ -128,18 +128,18 @@ the server, so this is CPU the server process spends. For wide pipelines at a
 high object rate, lower the ratio (failed and slow passes are still kept) or
 `RR_OTEL_COMPONENT_SPANS`.
 
-Measured on an 8-core laptop (the figures grow on a slower or busier CPU),
-against the same server with telemetry off: about 25 µs per WebSocket request,
-40 µs per database call (dependency recording: `RR_OTEL_INSTRUMENT=none` removes
-it), 11 µs per component enter or leave in the server, and 2 µs per node call in
-the run's process. End to end, with four clients: a pipeline that calls an LLM
-(20 ms) took 2.9 ms longer per request (2%; 7% more CPU); a pipeline doing almost
-no work per object, which keeps the server's event loop saturated, 4.4 ms longer
-(15%; 10% more CPU), about a third of it the component timing, the rest not yet
-explained (see `tools/telemetry_overhead/RESULTS.md`). With telemetry off the
-cost is nothing measurable, the engine included. The scripts to measure it on
-your own hardware, the raw results and how each figure is computed are in
-`tools/telemetry_overhead`.
+Measured once, on one 8-core laptop with OpenTelemetry SDK 1.45.2 (the figures
+grow on a slower or busier CPU), against the same server with telemetry off:
+about 25 µs per WebSocket request, 40 µs per database call (dependency
+recording: `RR_OTEL_INSTRUMENT=none` removes it), 11–12 µs per component enter
+or leave in the server, and 2 µs per node call in the run's process. End to end,
+with four clients: a pipeline that calls an LLM (20 ms) took 2.9 ms longer per
+request (2%; 7% more CPU); a pipeline doing almost no work per object, which
+keeps the server's event loop saturated, the worst case, 4.4 ms longer (15%;
+10% more CPU), about a third of it the component timing, the rest not yet
+explained. With telemetry off the cost is nothing measurable, the engine
+included. Measure it on your own hardware with the scripts in
+`tools/telemetry_overhead`; its README says how each figure is computed.
 
 ## Metrics
 

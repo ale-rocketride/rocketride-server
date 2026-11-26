@@ -34,8 +34,8 @@ difference measured.
 The difference between the two "off" servers is the noise: telemetry's cost is
 what "on" adds beyond it.
 
-Keep the output (`... > results/<date>-ab.txt`) and summarize it with
-`summarize.py`. Add a server with `RR_OTEL_INSTRUMENT=none` to see the dependency recording apart,
+Keep the output (`... > <date>-ab.txt`, outside the repository) and summarize it
+with `summarize.py`. Add a server with `RR_OTEL_INSTRUMENT=none` to see the dependency recording apart,
 or one with `OTEL_EXPORTER_OTLP_ENDPOINT` pointing nowhere to see a collector that
 is down. Compare rounds, not single numbers: the machine's load moves both.
 
@@ -48,7 +48,24 @@ is down. Compare rounds, not single numbers: the machine's load moves both.
 
 Compare event types, fields and output lines; run each twice to see what varies
 by timing alone; an event carrying the engine's pass id (`tid`) is marked. Run it
-against a server on the previous engine build to compare engines. Results: `RESULTS.md`.
+against a server on the previous engine build to compare engines.
 
-The raw output behind `RESULTS.md` is in `results/` (its README says which server
-was which).
+## Reference figures
+
+Measured once, on one machine (8-core macOS laptop, OrbStack, engine 3.6.0,
+OpenTelemetry SDK 1.45.2, collector reached through a `kubectl port-forward`),
+telemetry on with production settings (`RR_OTEL_TRACES_SAMPLE_RATIO=0`), against
+the same server with telemetry off:
+
+- End to end, four clients: `llm` p50 +2.9 ms (2 %; 7 % more CPU); `text`, the
+  worst case (a saturated event loop, almost no work per object), p50 +4.4 ms
+  (15 %; 10 % more CPU).
+- Per call: 11–12 µs per component enter or leave in EaaS, 22–26 µs per
+  WebSocket request, 39–41 µs per database call (sqlite in memory, the worst
+  case), 2.2–2.4 µs per node handler call in a run's process with the relay on.
+- Telemetry off: within or just above the noise floor against the engine build
+  without telemetry.
+
+These depend on the machine and its load (on a busier moment of the same
+machine every per-call figure was about 1.5 times these). Measure on your own
+hardware with the scripts above; the raw results are not kept in the repository.
