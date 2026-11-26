@@ -257,7 +257,7 @@ class TestSignalCapture:
         assert calls == [(handled_signal, fake_server.handle_exit)]
 
 
-async def test_an_authenticator_that_raises_is_a_server_error_logged_at_error(caplog):
+async def test_an_authenticator_that_raises_is_a_server_error_logged_at_error(caplog, fresh_auth_error_limit):
     """A store or identity provider failing inside an authenticator is ours: 500 and an ERROR line, not the user's 400."""
     import logging
 
@@ -289,5 +289,96 @@ async def test_a_run_key_naming_no_live_run_is_the_callers_401_not_ours(caplog):
     server._authenticators = [stale]
     with caplog.at_level(logging.ERROR, logger='rocketride.auth'):
         result = await server._authenticate_credential_inner('tk_oldkey')
+    assert result == (401, 'Authentication failed')
+    assert not [r for r in caplog.records if r.name == 'rocketride.auth']
+
+
+@pytest.fixture
+def fresh_auth_error_limit():
+    """Each test starts with no ERROR line logged for any exception type."""
+    from ai.web.server import _AUTH_ERROR_LIMIT
+
+    _AUTH_ERROR_LIMIT.reset()
+    yield _AUTH_ERROR_LIMIT
+    _AUTH_ERROR_LIMIT.reset()
+
+
+def _server_with(*authenticators):
+    server = WebServer.__new__(WebServer)
+    server._authenticators = list(authenticators)
+    return server
+
+
+async def test_an_authenticator_permission_error_is_401(caplog, fresh_auth_error_limit):
+    """An authenticator that denies the credential answers 401, with no ERROR line."""
+
+    async def denies(authorization):
+        raise PermissionError('not allowed')
+
+    with caplog.at_level(logging.ERROR, logger='rocketride.auth'):
+        result = await _server_with(denies)._authenticate_credential_inner('rr_somekey')
+    assert result == (401, 'Authentication failed')
+    assert not [r for r in caplog.records if r.name == 'rocketride.auth']
+
+
+async def test_a_runtime_error_in_an_authenticator_is_500(fresh_auth_error_limit):
+    """A plain RuntimeError (not a TaskError) is a server error."""
+
+    async def buggy(authorization):
+        raise RuntimeError('bug')
+
+    result = await _server_with(buggy)._authenticate_credential_inner('rr_somekey')
+    assert result == (500, 'Authentication service error')
+
+
+async def test_the_server_error_line_is_logged_once_per_type_per_minute(caplog, fresh_auth_error_limit):
+    """Two RuntimeErrors within a minute: both answer 500, one ERROR line; another type gets its own line."""
+
+    async def buggy(authorization):
+        raise RuntimeError('bug')
+
+    async def unreachable(authorization):
+        raise ConnectionError('store unreachable')
+
+    with caplog.at_level(logging.ERROR, logger='rocketride.auth'):
+        first = await _server_with(buggy)._authenticate_credential_inner('rr_a')
+        second = await _server_with(buggy)._authenticate_credential_inner('rr_b')
+        other = await _server_with(unreachable)._authenticate_credential_inner('rr_c')
+    assert first == second == other == (500, 'Authentication service error')
+    records = [r for r in caplog.records if r.name == 'rocketride.auth']
+    assert len(records) == 2
+    assert records[0].exc_info[0] is RuntimeError
+    assert records[1].exc_info[0] is ConnectionError
+
+
+def test_the_error_line_limit_counts_the_calls_it_held_back(monkeypatch):
+    """After the minute, the next ERROR line says how many of that type were not logged."""
+    from ai.web import server as server_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(server_module.time, 'monotonic', lambda: clock[0])
+    limit = server_module._ErrorLineLimit(window=60.0)
+    assert limit.allow('RuntimeError') == (True, 0)
+    assert limit.allow('RuntimeError') == (False, 1)
+    assert limit.allow('RuntimeError') == (False, 2)
+    clock[0] += 61
+    assert limit.allow('RuntimeError') == (True, 2)
+    assert limit.allow('RuntimeError') == (False, 1)
+
+
+async def test_a_raising_refusal_reporter_still_gives_401(caplog, fresh_auth_error_limit):
+    """A failure while recording a refused run key never turns the caller's 401 into a 500."""
+    from ai.modules.task.task_server import TaskServer
+
+    class BrokenLostRuns:
+        def refused(self, key):
+            raise RuntimeError('telemetry bug')
+
+    task_server = TaskServer.__new__(TaskServer)
+    task_server._task_control = {}
+    task_server._lost_runs = BrokenLostRuns()
+
+    with caplog.at_level(logging.ERROR, logger='rocketride.auth'):
+        result = await _server_with(task_server.authenticate)._authenticate_credential_inner('tk_unknown')
     assert result == (401, 'Authentication failed')
     assert not [r for r in caplog.records if r.name == 'rocketride.auth']

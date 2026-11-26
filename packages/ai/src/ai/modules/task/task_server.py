@@ -915,10 +915,19 @@ class TaskServer(DAPBase):
         raise TaskError(TaskError.NOT_REGISTERED, 'Your pipeline is not running')
 
     def _refused(self, key: str) -> None:
-        """A call with run key `key` was refused: LostRuns names the lost run (when there is one)."""
+        """
+        A call with run key `key` was refused: LostRuns names the lost run (when there is one).
+
+        Never raises: this runs on the sign-in path, where a failure here would
+        turn the caller's 401 into a 500.
+        """
         lost_runs = getattr(self, '_lost_runs', None)
-        if lost_runs is not None:
+        if lost_runs is None:
+            return
+        try:
             lost_runs.refused(key)
+        except Exception as e:
+            debug(f'lost runs: could not record a refused run key: {type(e).__name__}')
 
     def live_identities(self) -> List[Dict[str, Any]]:
         """The telemetry identity (org, run kind, project) of every run in progress (LiveRuns)."""
