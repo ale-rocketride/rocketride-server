@@ -152,7 +152,9 @@ DECIDED_SECONDS = 30.0  # how long a late span still follows its trace's decisio
 UNDECIDED_SECONDS = 600.0  # a trace whose request never ends is dropped after this
 
 _OPERATION = re.compile(r'^[A-Za-z][A-Za-z_]{0,31}$')
-_SQL_DETAIL = re.compile(r'\s*\[(?:SQL|parameters): .*?\](?=\s*(?:\[|\(Background|$))', re.DOTALL)
+# SQLAlchemy appends '[SQL: ...]' and '[parameters: ...]' to an error, then '(Background ...)'
+_SQL_MARKERS = ('[SQL: ', '[parameters: ')
+MAX_CLEAN_TEXT = 16384  # characters of an error text looked at; redact() keeps fewer
 
 
 # ── A request and its calls ───────────────────────────────────────────────────
@@ -1001,7 +1003,8 @@ def _port(url: Any) -> Optional[int]:
 
 
 _URL = re.compile(
-    r'\b([a-z][a-z0-9+.-]*)://(?:[^@/\s]*@)?(\[[0-9a-f:.]{2,45}\]|[^/:?#\s\'"]+)(:\d{1,5})?[^\s\'"]*', re.IGNORECASE
+    r'\b([a-z][a-z0-9+.-]{0,31})://(?:[^@/\s]{0,256}@)?(\[[0-9a-f:.]{2,45}\]|[^/:?#\s\'"]+)(:\d{1,5})?[^\s\'"]*',
+    re.IGNORECASE,
 )
 
 
@@ -1097,7 +1100,20 @@ def _clean_text(text: Any, redact: Callable[[str], str]) -> str:
     """An error text without SQL statement or parameters (SQLAlchemy appends both), URLs cut to
     scheme://host[:port] (a path can carry a token: api.telegram.org/bot<token>/...), redacted.
     """
-    return redact(_URL.sub(r'\1://\2\3', _SQL_DETAIL.sub('', str(text))))
+    return redact(_URL.sub(r'\1://\2\3', _without_sql(str(text)[:MAX_CLEAN_TEXT])))
+
+
+def _without_sql(text: str) -> str:
+    """The text without SQLAlchemy's statement and parameters: from the first marker to '(Background', or the end."""
+    starts = [i for i in (text.find(marker) for marker in _SQL_MARKERS) if i >= 0]
+    if not starts:
+        return text
+    start = min(starts)
+    end = text.find('(Background', start)
+    if end < 0:
+        return text[:start].rstrip()
+    middle = text[start:end]
+    return text[:start].rstrip() + middle[len(middle.rstrip()) :] + text[end:]
 
 
 # The attributes a dependency span keeps (current and older semantic-convention names)

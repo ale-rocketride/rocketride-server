@@ -431,6 +431,7 @@ async def test_exit_message_three_fields_unknown_token_maps_to_one():
         ('>EXIT*Python*Python error*init.cpp:647', 1, 'Python', 'Python error'),
         # A message holding '*' stays whole: the location is found from the end
         ('>EXIT*Exception*a * b*x.py:1', 1, 'Exception', 'a * b'),
+        ('>EXIT*InvalidParam*bad * value*services.cpp:2,103', 1, 'InvalidParam', 'bad * value'),
         # Not a code name: no errorCode (free text never becomes one)
         ('>EXIT*not a code*msg*x', 1, None, 'msg'),
         # Success and the numeric forms are unchanged

@@ -104,9 +104,10 @@ from . import TransportBase
 # passed on as errorCode when it is one, so the run outcome can tell a refused
 # pipeline from a platform failure (ai.modules.task.run_outcome).
 _ERROR_CODE_NAME = re.compile(r'^[A-Za-z_]{1,32}$')
-# The <location> field (a source 'file:line'): the message is everything before
-# it, '*' included (the engine does not escape it)
-_LOCATION = re.compile(r'^\S+\.(?:py|pyx|cpp|cc|hpp|h)(?::\d+)?$')
+# The <location> field (a source 'file:line', the line with thousands separators:
+# 'services.cpp:2,103'): the message is everything before it, '*' included (the
+# engine does not escape it)
+_LOCATION = re.compile(r'^\S+\.(?:py|pyx|cpp|cc|hpp|h)(?::[\d,]+)?$')
 
 
 def _exit_body(code_field: str, exit_code: int, message: str) -> Dict[str, Any]:

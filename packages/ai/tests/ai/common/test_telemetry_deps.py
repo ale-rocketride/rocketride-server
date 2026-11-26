@@ -355,6 +355,28 @@ def test_sanitized_spans_lose_statements_queries_and_secrets():
     assert isinstance(clean, ReadableSpan) and isinstance(clean.events[0], Event)
 
 
+@pytest.mark.parametrize(
+    'text, kept',
+    [
+        ("dup [SQL: INSERT x] [parameters: ('bob@example.com',)]", 'dup'),
+        (
+            'msg\n[SQL: SELECT a] (b)]\n[parameters: (1,)]\n(Background on this error at: x)',
+            'msg\n(Background on this error at: x)',
+        ),
+        ('no statement here', 'no statement here'),
+    ],
+)
+def test_an_error_text_loses_the_statement_and_its_parameters(text, kept):
+    assert _deps._clean_text(text, lambda t: t) == kept
+
+
+@pytest.mark.parametrize('text', [' ' * 200_000 + 'x', '[SQL: ' * 50_000, 'a.' * 100_000, 'a://' + 'b' * 200_000])
+def test_cleaning_a_large_error_text_stays_fast(text):
+    start = time.perf_counter()
+    _deps._clean_text(text, lambda t: t)
+    assert time.perf_counter() - start < 0.5
+
+
 def test_measurement_of_aws_calls_and_others():
     tracer = TracerProvider().get_tracer('opentelemetry.instrumentation.botocore')
     span = tracer.start_span(
