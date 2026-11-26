@@ -97,7 +97,7 @@ def test_a_traceback_then_the_engines_error_report_are_two_records(log):
     for line in ['Traceback (most recent call last):', '  File "a.py", line 1, in f', 'KeyError: x']:
         t.stderr(line)
     t.node_error('Error*node failed*a.py:1')  # the engine's report ends the traceback first
-    assert [r['msg'] for r in records(lines)][0] == 'KeyError: x'
+    assert [r['msg'] for r in records(lines)] == ['KeyError: x', 'node failed']
 
 
 def test_error_prefixed_lines_node_errors_and_exits(log):
@@ -153,6 +153,10 @@ def test_secrets_are_redacted(log):
     t, lines = log
     t.stderr('ERROR call to https://api.example.com/v1?key=AIzaSECRET123456&x=1 failed for bob@example.com')
     t.node_error('Exception*Authorization: Bearer abcdefghijklmnop rejected; token=sk-proj-abcdefghij*x.py:1')
+    assert len(lines) == 2
+    first, second = (r['msg'] for r in records(lines))
+    assert 'ERROR call to https://api.example.com' in first and 'failed for' in first
+    assert 'rejected' in second
     text = ' '.join(lines)
     for secret in ('AIzaSECRET123456', 'bob@example.com', 'abcdefghijklmnop', 'sk-proj-abcdefghij'):
         assert secret not in text
@@ -231,3 +235,15 @@ def test_the_runs_first_error_is_kept_for_its_trace(log):
     assert t.first == {'message': 'Invalid Anthropic API key format', 'location': 'anthropic.py:93', 'type': ''}
     t.reset()  # a new run of the task
     assert t.first is None
+
+
+def test_blank_lines_after_an_exception_do_not_grow_the_traceback(log):
+    t, lines = log
+    for line in ['Traceback (most recent call last):', '  File "a.py", line 1, in f', 'KeyError: x']:
+        t.stderr(line)
+    for _ in range(error_log.MAX_TRACEBACK_LINES + 10):
+        t.stderr('')
+    assert t._traceback is None or len(t._traceback) <= error_log.MAX_TRACEBACK_LINES + 1
+    t.flush()
+    (record,) = records(lines)
+    assert record['msg'] == 'KeyError: x'

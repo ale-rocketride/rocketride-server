@@ -104,6 +104,9 @@ from . import TransportBase
 # passed on as errorCode when it is one, so the run outcome can tell a refused
 # pipeline from a platform failure (ai.modules.task.run_outcome).
 _ERROR_CODE_NAME = re.compile(r'^[A-Za-z_]{1,32}$')
+# The <location> field (a source 'file:line'): the message is everything before
+# it, '*' included (the engine does not escape it)
+_LOCATION = re.compile(r'^\S+\.(?:py|pyx|cpp|cc|hpp|h)(?::\d+)?$')
 
 
 def _exit_body(code_field: str, exit_code: int, message: str) -> Dict[str, Any]:
@@ -932,9 +935,12 @@ class TransportStdio(TransportBase):
         # Parse exit status messages: '>EXIT*exit_code_hex*exit_message'
         elif message.startswith('>EXIT*'):
             try:
-                parts = message.split('*', 3)
-                if len(parts) == 4:
-                    _, s_exitCode, exitMessage, _ = parts
+                parts = message.split('*')
+                if len(parts) >= 4:
+                    s_exitCode = parts[1]
+                    # the location is searched from the end; without one, the last field
+                    end = next((i for i in range(len(parts) - 1, 2, -1) if _LOCATION.match(parts[i])), len(parts) - 1)
+                    exitMessage = '*'.join(parts[2:end])
                     try:
                         exitCode = int(s_exitCode, 16)
                     except ValueError:

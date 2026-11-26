@@ -124,6 +124,8 @@ class TaskErrorLog:
                     self._traceback.append(line)
                     if line.startswith(_CHAINED):
                         self._ended = False
+                    elif len(self._traceback) > MAX_TRACEBACK_LINES:
+                        self._flush_traceback()
                     return
                 # anything else: the traceback ended at the exception line
                 self._flush_traceback()

@@ -362,3 +362,46 @@ def test_an_agents_python_instance_still_names_the_questions_trace(monkeypatch):
     python_instance = SimpleNamespace(instance=SimpleNamespace(passTraceId='ab' * 16))
     llm_base.report_llm_failure('agent failed', RuntimeError('x'), instance=python_instance, mark=False)
     assert lines and lines[0].endswith('pass_trace_id=' + 'ab' * 16)
+
+
+def test_a_local_error_raised_from_none_is_not_the_providers():
+    # `raise ... from None` hides the connect failure it was handling
+    try:
+        try:
+            raise ConnectionRefusedError()
+        except ConnectionRefusedError:
+            raise RuntimeError('local') from None
+    except RuntimeError as e:
+        hidden = e
+    assert provider_error_type(hidden) == 'provider_error'
+    # an implicit context still decides
+    try:
+        try:
+            raise ConnectionRefusedError()
+        except ConnectionRefusedError:
+            raise RuntimeError('wrapped')
+    except RuntimeError as e:
+        implicit = e
+    assert provider_error_type(implicit) == 'provider_unreachable'
+
+
+class _OddResponseError(Exception):
+    def __init__(self) -> None:
+        super().__init__('odd')
+        self.response = {'Error': 'not a mapping', 'ResponseMetadata': ['nor this']}
+
+
+def test_an_unknown_response_shape_falls_back_to_the_class():
+    assert provider_error_type(_OddResponseError()) == 'provider_error'
+
+
+def test_a_failing_report_still_writes_the_error_answer(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError('report failed')
+
+    monkeypatch.setattr(llm_base, 'report_llm_failure', boom)
+    node = _node(_StatusError(401))
+
+    node.writeQuestions(_Question())
+
+    assert '**LLM error**' in node.instance.written[0].getText()

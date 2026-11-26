@@ -121,10 +121,12 @@ def _status_and_name(exc: BaseException):
             break
     response = getattr(exc, 'response', None)
     if isinstance(response, dict):  # botocore ClientError
-        meta = response.get('ResponseMetadata') or {}
+        meta = response.get('ResponseMetadata')
+        meta = meta if isinstance(meta, dict) else {}
         if status is None and isinstance(meta.get('HTTPStatusCode'), int):
             status = meta['HTTPStatusCode']
-        code = (response.get('Error') or {}).get('Code')
+        err = response.get('Error')
+        code = err.get('Code') if isinstance(err, dict) else None
         if isinstance(code, str) and code:
             name = code
     elif status is None and response is not None:
@@ -154,7 +156,11 @@ def provider_error_type(exc: BaseException, default: str = 'provider_error') -> 
     current: Optional[BaseException] = exc
     while current is not None and all(current is not seen for seen in chain):
         chain.append(current)
-        current = current.__cause__ or current.__context__
+        # `raise ... from None` hides the context: a local error is not the provider's
+        if current.__cause__ is not None:
+            current = current.__cause__
+        else:
+            current = None if current.__suppress_context__ else current.__context__
     told = [_status_and_name(link) for link in chain]
     if all(status is None for status, _ in told):
         names = [name for _, name in told]
@@ -303,7 +309,10 @@ class LLMBase(IInstanceBase):
                 # An error, not a warning: the run's error log (and its trace)
                 # must show a question the provider refused, e.g. a customer's
                 # rejected API key; the server redacts secrets from the line
-                report_llm_failure('writeQuestions', e, instance=self.instance)
+                try:
+                    report_llm_failure('writeQuestions', e, instance=self.instance)
+                except Exception:  # best effort: never lose the error answer
+                    pass
                 if is_turn(question):
                     answer = Answer(error=_turn_error(e))
                 else:
