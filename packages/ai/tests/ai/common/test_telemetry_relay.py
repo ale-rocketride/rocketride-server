@@ -289,9 +289,9 @@ def test_a_relayed_dropped_count_is_bounded(sink):
         {'dropped': '7', 'reason': 'relay_overflow'},
     ]
     telemetry.dependency_relayed('task-1', {'calls': batch}, PIPELINE)
-    from ai.common.telemetry import _otel
+    from ai.common.telemetry import _common
 
-    assert _dropped(reader)['relay_overflow'] == _otel.MAX_RELAYED_DROPPED
+    assert _dropped(reader)['relay_overflow'] == _common.MAX_RELAYED_DROPPED
 
 
 def _mark(when, **changes):
@@ -406,9 +406,9 @@ def test_relayed_attributes_are_only_the_known_ones(sink):
 
 
 def test_the_relay_and_eaas_agree_on_the_attributes():
-    from ai.common.telemetry import _otel
+    from ai.common.telemetry import _common
 
-    assert frozenset(relay._KEEP) == _otel._RELAY_ATTRIBUTES
+    assert frozenset(relay._KEEP) == _common._RELAY_ATTRIBUTES
 
 
 def test_relayed_calls_count_against_the_buffer_and_are_released(sink):
@@ -644,9 +644,9 @@ def test_a_relayed_call_of_another_pass_is_not_placed_in_the_open_one(sink):
 
 def test_a_customer_cannot_take_every_pipeline_server(sink, monkeypatch):
     telemetry, _, reader = sink
-    from ai.common.telemetry import _otel
+    from ai.common.telemetry import _dependencies
 
-    monkeypatch.setattr(_otel, 'MAX_SERVERS_PER_ORG', 2)
+    monkeypatch.setattr(_dependencies, 'MAX_SERVERS_PER_ORG', 2)
     for org, server in (('org-a', 'a1'), ('org-a', 'a2'), ('org-a', 'a3'), ('org-b', 'b1')):
         attributes = {'server.address': server, 'rocketride.dependency.origin': 'pipeline', '_org': org}
         telemetry._measure_dependency('http.client.request.duration', 0.01, attributes)
@@ -1438,9 +1438,9 @@ def test_a_pass_whose_trace_is_not_kept_leaves_no_exemplar(sink):
 
 def test_models_past_the_bound_of_a_provider_are_other(sink, monkeypatch):
     telemetry, _spans, _reader = sink
-    from ai.common.telemetry import _otel
+    from ai.common.telemetry import _dependencies
 
-    monkeypatch.setattr(_otel, 'MAX_MODELS_PER_PROVIDER', 2)
+    monkeypatch.setattr(_dependencies, 'MAX_MODELS_PER_PROVIDER', 2)
     impl = telemetry
     assert [impl._bounded_model('openai', m) for m in ('a', 'b', 'c', 'a')] == ['a', 'b', '_other', 'a']
     assert impl._bounded_model('anthropic', 'c') == 'c'
@@ -1510,7 +1510,7 @@ def test_an_engine_error_is_the_node_whose_handler_raised_with_its_class_on_the_
 
 def test_a_stale_raise_does_not_name_a_later_engine_error(sink, monkeypatch):
     telemetry, _spans, reader = sink
-    from ai.common.telemetry import _otel
+    from ai.common.telemetry import _runs
 
     _begin(telemetry, 'tok.chat_1')
     telemetry.component_trace('tok.chat_1', 'enter', 3, 'my_llm', time.time(), {}, PIPELINE)
@@ -1519,7 +1519,7 @@ def test_a_stale_raise_does_not_name_a_later_engine_error(sink, monkeypatch):
         {'calls': [{'k': 'exc', 'x': 'KeyError', 'g': '', 'l': '', 'w': time.time_ns(), 'p': 3, 'c': 'my_llm'}]},
         PIPELINE,
     )
-    monkeypatch.setattr(_otel, 'RAISED_MATCH_SECONDS', -1.0)
+    monkeypatch.setattr(_runs, 'RAISED_MATCH_SECONDS', -1.0)
     telemetry.task_event(
         'tok.chat_1', {'event': 'apaevt_status_error', 'body': {'message': 'Error*x*store.cpp:1'}}, identity
     )

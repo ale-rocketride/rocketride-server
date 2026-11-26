@@ -42,7 +42,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader  # noqa: E402
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter  # noqa: E402
 from opentelemetry.trace import StatusCode  # noqa: E402
 
-from ai.common.telemetry import _otel  # noqa: E402
+from ai.common.telemetry import _common, _dependencies, _otel, _runs  # noqa: E402
 from ai.common.telemetry._otel import OUTCOMES, RUN_KINDS, Telemetry  # noqa: E402
 
 PIPELINE = {
@@ -349,17 +349,17 @@ def test_leave_without_enter_and_stack_cap(sink):
     begin(telemetry)
     telemetry.component_trace('task-1', 'leave', 0, 'parse_1', 100.0, {}, PIPELINE)
     assert value(points(reader), 'rocketride.component.duration') is None
-    for _ in range(_otel.MAX_STACK_DEPTH + 50):  # leaves lost (killed process)
+    for _ in range(_common.MAX_STACK_DEPTH + 50):  # leaves lost (killed process)
         telemetry.component_trace('task-1', 'enter', 0, 'parse_1', 100.0, {}, PIPELINE)
-    assert len(telemetry._runs['task-1'].invocations[0].stack) == _otel.MAX_STACK_DEPTH
+    assert len(telemetry._runs['task-1'].invocations[0].stack) == _common.MAX_STACK_DEPTH
 
 
 def test_invocation_cap(sink):
     telemetry, _, reader = sink
     begin(telemetry)
-    for pipe in range(_otel.MAX_OPEN_INVOCATIONS + 10):
+    for pipe in range(_common.MAX_OPEN_INVOCATIONS + 10):
         telemetry.component_trace('task-1', 'enter', pipe, 'parse_1', 100.0, {}, PIPELINE)
-    assert len(telemetry._runs['task-1'].invocations) == _otel.MAX_OPEN_INVOCATIONS
+    assert len(telemetry._runs['task-1'].invocations) == _common.MAX_OPEN_INVOCATIONS
     dropped = value(points(reader), 'rocketride.telemetry.dropped', rocketride__telemetry__reason='invocation_cap')
     assert dropped.value == 10
 
@@ -426,7 +426,7 @@ def test_request_codes_must_look_like_codes(sink):
 def test_an_evicted_run_that_reports_again_is_tracked_anew(monkeypatch):
     # Documented limit (past MAX_LIVE_TASKS only): the run comes back with no
     # baseline, so its cumulative object count is counted again
-    monkeypatch.setattr(_otel, 'MAX_LIVE_TASKS', 1)
+    monkeypatch.setattr(_runs, 'MAX_LIVE_TASKS', 1)
     telemetry, _, reader = make()
     begin(telemetry, 't0')
     telemetry.task_event('t0', {'event': 'apaevt_status_update', 'body': {'state': 3, 'completedCount': 2}}, identity)
@@ -454,7 +454,8 @@ def test_component_span_cap_has_a_ceiling():
 
 
 def test_buffered_calls_budget_is_global_and_given_back(monkeypatch):
-    monkeypatch.setattr(_otel, 'MAX_BUFFERED_CALLS', 3)
+    monkeypatch.setattr(_runs, 'MAX_BUFFERED_CALLS', 3)
+    monkeypatch.setattr(_dependencies, 'MAX_BUFFERED_CALLS', 3)
     telemetry, spans, reader = make()
     begin(telemetry)
     begin(telemetry, 'task-2')
@@ -498,7 +499,7 @@ def test_a_full_trace_queue_drops_and_counts(monkeypatch):
 
 
 def test_live_run_cap_evicts_least_recently_active_and_still_counts(monkeypatch):
-    monkeypatch.setattr(_otel, 'MAX_LIVE_TASKS', 3)
+    monkeypatch.setattr(_runs, 'MAX_LIVE_TASKS', 3)
     telemetry, _, reader = make()
     for n in range(3):
         begin(telemetry, f't{n}')
@@ -906,6 +907,7 @@ def test_clean_attributes_for_declared_metrics(sink, monkeypatch):
         'rocketride.org.id': 'org-a',
     }
     monkeypatch.setattr(_otel, 'MAX_ATTRIBUTE_SETS', 2)
+    monkeypatch.setattr(_runs, 'MAX_ATTRIBUTE_SETS', 2)
     telemetry.clean_attributes('n', keys, {'outcome': 'a'})
     telemetry.clean_attributes('n', keys, {'outcome': 'b'})
     assert telemetry.clean_attributes('n', keys, {'outcome': 'c'}) == {'rocketride.auth.outcome': '_other'}
@@ -1134,7 +1136,7 @@ def test_a_series_idle_no_more_is_dropped_later(sink, monkeypatch):
     _idle(reader)
     telemetry.component_trace('task-1', 'leave', 0, 'my_secret_llm_name', 101.0, {}, PIPELINE)
     assert _idle(reader) == {('llm_openai', 'org-a'): 0}  # 0 while recent
-    monkeypatch.setattr(_otel, 'IDLE_KEY_SECONDS', -1.0)
+    monkeypatch.setattr(_runs, 'IDLE_KEY_SECONDS', -1.0)
     assert _idle(reader) == {}  # then gone: no series kept forever
 
 

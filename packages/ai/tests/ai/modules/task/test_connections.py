@@ -170,9 +170,10 @@ def test_customers_past_the_cap_add_up_in_other(monkeypatch):
 
 def test_attribute_sets_are_sized_to_the_org_cap(monkeypatch):
     """Every org keeps its own series up to the org cap, whatever MAX_ATTRIBUTE_SETS is."""
-    from ai.common.telemetry import _otel
+    from ai.common.telemetry import _otel, _runs
 
     monkeypatch.setattr(_otel, 'MAX_ATTRIBUTE_SETS', 4)
+    monkeypatch.setattr(_runs, 'MAX_ATTRIBUTE_SETS', 4)
     reader, impl = _capped(monkeypatch, 10)
     conns = [_Conn(_Account(f'org-{n}', 'u')) for n in range(10)]
     conns += [_Conn(_Account(f'org-{n}', 'o', auth='tk_x')) for n in range(10)] + [_Conn()]
