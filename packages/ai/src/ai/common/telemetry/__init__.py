@@ -68,7 +68,7 @@ Configuration (environment, or the engine's .env):
     RR_OTEL_ORG_ATTRIBUTE           'false' leaves the customer org id off metrics and spans
     RR_OTEL_ORG_CARDINALITY         distinct org ids this process attributes, across all
                                     metrics (default 2000; later ones are '_other')
-    RR_OTEL_AUTO_INSTALL            'true' installs a missing SDK at startup (otel-sdk.txt)
+    RR_OTEL_AUTO_INSTALL            'true' installs a missing SDK at startup (requirements.txt)
                                     on a background thread. Off by default: depends() holds
                                     the engine-wide install lock meanwhile, so other imports
                                     and task starts would wait. Images ship the SDK instead.
@@ -118,10 +118,10 @@ _closed = False
 # The connection count source, kept so a later start still gets it
 _connections: Optional[Callable[[], int]] = None
 
-# The SDK, installed with depends() only when telemetry is on. Not named
-# requirement*.txt: the engine-wide constraints compile (depends.py) collects
-# those, and these pins must not narrow every node's resolution while off.
-SDK_REQUIREMENTS = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'otel-sdk.txt')
+# The SDK and the instrumentations, installed by install_sdk() only when
+# telemetry is used. The engine-wide constraints compile (depends.py) resolves
+# this file with every node's; nothing installs it while telemetry is off.
+SDK_REQUIREMENTS = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'requirements.txt')
 
 # Every metric any module declared (Counter/Histogram), bound when telemetry starts
 _declared: List['_Instrument'] = []
@@ -129,6 +129,14 @@ _declared: List['_Instrument'] = []
 
 def _truthy(value: Optional[str]) -> bool:
     return (value or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def install_sdk() -> None:
+    """Install the OpenTelemetry SDK and the instrumentations (SDK_REQUIREMENTS) with depends()."""
+    from depends import load_depends  # type: ignore
+
+    load_depends(__file__)
+    importlib.invalidate_caches()
 
 
 def is_enabled_by_environment(environ: Optional[Mapping[str, str]] = None) -> bool:
@@ -174,7 +182,7 @@ def init(service_version: str = '') -> None:
     if not _truthy(os.environ.get('RR_OTEL_AUTO_INSTALL')):
         warning(
             'OpenTelemetry stays off: the SDK is not installed. Install it with '
-            f'`./engine -c "from depends import depends; depends(\'{SDK_REQUIREMENTS}\')"` '
+            '`./engine -c "from ai.common.telemetry import install_sdk; install_sdk()"` '
             '(or set RR_OTEL_AUTO_INSTALL=true)'
         )
         with _state_lock:
@@ -201,10 +209,7 @@ def _check_protocol() -> None:
 def _install_then_start(service_version: str) -> None:
     global _starting
     try:
-        from depends import depends  # type: ignore
-
-        depends(SDK_REQUIREMENTS)
-        importlib.invalidate_caches()
+        install_sdk()
     except Exception as e:
         warning(f'OpenTelemetry stays off: the SDK could not be installed ({type(e).__name__}: {e})')
         with _state_lock:

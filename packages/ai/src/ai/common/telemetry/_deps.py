@@ -48,7 +48,6 @@ import importlib.util
 import os
 import random
 import re
-import tempfile
 import threading
 import time
 import weakref
@@ -645,15 +644,6 @@ def contrib_version() -> str:
     return f'0.{minor + 21}'
 
 
-def requirements() -> List[str]:
-    """The pip specifiers of the instrumentations, at the release matching the SDK."""
-    release = contrib_version()
-    major, minor = release.split('.')
-    bounds = f'>={release}b0,<{major}.{int(minor) + 1}'
-    names = sorted({package for *_, package in INSTRUMENTATIONS} | set(EXTRA_PACKAGES))
-    return [f'{name}{bounds}' for name in names]
-
-
 def check_installed() -> List[str]:
     """
     Every instrumentation package of the table installed, at the SDK's release
@@ -671,15 +661,10 @@ def check_installed() -> List[str]:
 
 
 def install() -> None:
-    """Install the instrumentations (the image build; RR_OTEL_AUTO_INSTALL at run time)."""
-    from depends import depends  # type: ignore
+    """Install the instrumentations: the telemetry requirements.txt pins them (RR_OTEL_AUTO_INSTALL at run time)."""
+    from . import install_sdk
 
-    with tempfile.TemporaryDirectory() as folder:
-        path = os.path.join(folder, 'otel-instrumentation.txt')
-        with open(path, 'w') as file:
-            file.write('\n'.join(requirements()) + '\n')
-        depends(path)
-    importlib.invalidate_caches()
+    install_sdk()
 
 
 def parse_flags(value: Optional[str]) -> Tuple[List[str], List[str]]:

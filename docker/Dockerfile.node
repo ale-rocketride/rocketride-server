@@ -32,12 +32,13 @@ RUN warm-wheel-cache
 
 # Telemetry in a task (ai/common/telemetry/relay.py): the OpenTelemetry SDK and
 # the instrumentations of the nodes' dependency calls (the table in
-# ai/common/telemetry/_deps.py), at matching releases, so a task with telemetry
-# on never installs them while it runs. They load only when the server starts the
-# task with --otel_relay; with telemetry off nothing imports them. The check
-# fails the build when a package of the table is missing or of another release.
-RUN ./engine -c "from depends import depends; depends('ai/common/telemetry/otel-sdk.txt')" \
-    && ./engine -c "from ai.common.telemetry import _deps; _deps.install(); print('otel instrumentation ok:', len(_deps.check_installed()))"
+# ai/common/telemetry/_deps.py), pinned in ai/common/telemetry/requirements.txt,
+# so a task with telemetry on never installs them while it runs. They load only
+# when the server starts the task with --otel_relay; with telemetry off nothing
+# imports them. The check fails the build when a package of the table is missing
+# or of another release than the SDK.
+RUN ./engine -c "from ai.common.telemetry import install_sdk; install_sdk()" \
+    && ./engine -c "from ai.common.telemetry import _deps; print('otel instrumentation ok:', len(_deps.check_installed()))"
 
 # The Launcher supplies the whole command line. tini reaps the uv processes a
 # task spawns.

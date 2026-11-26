@@ -31,6 +31,7 @@ before, during and after.
 """
 
 import logging
+import os
 import sys
 import threading
 import time
@@ -133,7 +134,7 @@ def test_missing_sdk_stays_off_without_installing(monkeypatch):
     monkeypatch.setattr(telemetry, '_install_then_start', lambda *_: pytest.fail('installed without opt-in'))
     telemetry.init('1.0')
     assert telemetry._impl is None and not telemetry._starting
-    assert len(warnings) == 1 and 'otel-sdk.txt' in warnings[0]
+    assert len(warnings) == 1 and 'install_sdk()' in warnings[0]
 
 
 def test_missing_sdk_installs_in_background_and_never_blocks(monkeypatch):
@@ -163,13 +164,26 @@ def test_failed_install_leaves_it_off(monkeypatch):
     monkeypatch.setenv('RR_OTEL_ENABLED', 'true')
     fake_depends = type(sys)('depends')
 
-    def depends(_):
+    def load_depends(_):
         raise OSError('no network')
 
-    fake_depends.depends = depends
+    fake_depends.load_depends = load_depends
     monkeypatch.setitem(sys.modules, 'depends', fake_depends)
     telemetry._install_then_start('1.0')
     assert telemetry._impl is None and not telemetry._starting
+
+
+def test_install_sdk_installs_the_requirements_next_to_the_package(monkeypatch):
+    installed = []
+    fake_depends = type(sys)('depends')
+    fake_depends.load_depends = lambda current_file: installed.append(current_file)
+    monkeypatch.setitem(sys.modules, 'depends', fake_depends)
+    telemetry.install_sdk()
+    assert installed == [telemetry.__file__]
+    assert telemetry.SDK_REQUIREMENTS == os.path.join(
+        os.path.dirname(os.path.realpath(telemetry.__file__)), 'requirements.txt'
+    )
+    assert os.path.isfile(telemetry.SDK_REQUIREMENTS)
 
 
 def test_declared_metrics_bind_when_telemetry_starts(monkeypatch):

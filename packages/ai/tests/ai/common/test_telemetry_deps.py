@@ -373,21 +373,17 @@ def test_flags_and_requirements(monkeypatch):
     assert _deps.parse_flags('http, db,kafka') == (['db', 'http'], ['kafka'])
     monkeypatch.setattr('opentelemetry.sdk.version.__version__', '1.45.2')
     assert _deps.contrib_version() == '0.66'
-    assert _deps.requirements() == [
-        f'opentelemetry-instrumentation-{name}>=0.66b0,<0.67'
-        for name in (
-            'aiohttp-client',
-            'botocore',
-            'grpc',
-            'httpx',
-            'psycopg',
-            'psycopg2',
-            'pymongo',
-            'requests',
-            'threading',
-            'urllib3',
-        )
-    ]
+
+
+def test_requirements_pin_every_instrumentation_at_the_sdks_contrib_release():
+    with open(telemetry_module.SDK_REQUIREMENTS, encoding='utf-8') as file:
+        pins = dict(line.split('==') for line in (raw.split('#')[0].strip() for raw in file) if line)
+    sdk = pins.pop('opentelemetry-sdk')
+    assert pins.pop('opentelemetry-exporter-otlp-proto-http') == sdk
+    contrib = f'0.{int(sdk.split(".")[1]) + 21}'  # SDK 1.N pairs with contrib 0.(N+21)
+    names = {package for *_, package in _deps.INSTRUMENTATIONS} | set(_deps.EXTRA_PACKAGES)
+    assert set(pins) == names
+    assert all(version.startswith(contrib + 'b') for version in pins.values()), pins
 
 
 def test_redis_calls_are_recorded():

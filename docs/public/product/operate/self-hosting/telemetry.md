@@ -32,8 +32,13 @@ Telemetry needs the OpenTelemetry SDK next to the engine. Install it once, for
 example in your image build:
 
 ```bash
-./engine -c "from depends import depends; depends('ai/common/telemetry/otel-sdk.txt')"
+./engine -c "from ai.common.telemetry import install_sdk; install_sdk()"
 ```
+
+This installs `ai/common/telemetry/requirements.txt`: the SDK, the OTLP/HTTP
+exporter and the instrumentations of dependency calls, at fixed versions that
+are resolved together with every node's dependencies. Nothing installs them
+while telemetry is off.
 
 Without it, telemetry stays off and the server logs one warning saying so. With
 `RR_OTEL_AUTO_INSTALL=true` the server installs it itself, in the background, and
