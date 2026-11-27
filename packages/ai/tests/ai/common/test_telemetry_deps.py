@@ -88,7 +88,9 @@ def query(connection, sql="SELECT 'bob@example.com'"):
 
 
 def http_call(
-    telemetry, status=200, url='https://api.stripe.com/v1/customers?email=bob@example.com&key=sk-abcdef123456'
+    telemetry,
+    status=200,
+    url='https://api.stripe.com/v1/customers?email=bob@example.com&key=sk-abcdef123456',  # gitleaks:allow
 ):
     """A span as the httpx instrumentation records it, under whatever is current."""
     tracer = telemetry._tracer_provider.get_tracer(HTTP_SCOPE)
@@ -420,12 +422,14 @@ def test_redis_calls_are_recorded():
     assert recorder.install()
     try:
         client = redis.Redis(host='127.0.0.1', port=1, socket_connect_timeout=0.05)
-        with pytest.raises(redis.exceptions.ConnectionError):
+        # refused at once on Linux and macOS; Windows retries the connect and times out
+        with pytest.raises((redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)):
             client.get('k')
     finally:
         recorder.uninstall()
     recorded = [(c.name, c.error_type, c.attributes['server.address']) for c in calls]
-    assert recorded == [('GET', 'ConnectionError', '127.0.0.1')]
+    assert len(recorded) == 1 and recorded[0][1] in ('ConnectionError', 'TimeoutError')
+    assert recorded[0][0] == 'GET' and recorded[0][2] == '127.0.0.1'
     assert redis.Redis.execute_command.__name__ == 'execute_command'  # restored
 
 

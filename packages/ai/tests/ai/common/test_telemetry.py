@@ -998,10 +998,11 @@ def test_a_wide_pipeline_costs_the_event_loop_little(sink, monkeypatch):
 def test_hooks_are_cheap(sink):
     telemetry, _, _ = sink
     begin(telemetry)
-    started = time.perf_counter()
-    for n in range(20000):
+    # CPU time of this thread: other test workers sharing the machine do not count
+    started = time.thread_time()
+    for n in range(5000):
         call(telemetry, 'parse_1', pipe=n % 8)
-    per_call = (time.perf_counter() - started) / 40000
+    per_call = (time.thread_time() - started) / 10000
     assert per_call < 0.001  # generous bound: a hook must stay far below a millisecond
 
 

@@ -128,8 +128,11 @@ def test_the_failure_marks_the_question_trace_redacted(monkeypatch):
 @pytest.mark.parametrize(
     'text, secret',
     [
-        ('Incorrect API key provided: sk-proj-abcdefghijklmnop1234', 'abcdefghijklmnop1234'),
-        ('400 https://generativelanguage.googleapis.com/v1/models?key=AIzaSyAbcdefghijkl123', 'AIzaSyAbcdefghijkl123'),
+        ('Incorrect API key provided: sk-proj-abcdefghijklmnop1234', 'abcdefghijklmnop1234'),  # gitleaks:allow
+        (
+            '400 https://generativelanguage.googleapis.com/v1/models?key=AIzaSyAbcdefghijkl123',  # gitleaks:allow
+            'AIzaSyAbcdefghijkl123',
+        ),
         ('echo: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abcdefgh', 'eyJhbGciOiJIUzI1NiJ9'),
         ('invalid x-api-key: sk-ant-api03-abcdefghijklmnop', 'abcdefghijklmnop'),
     ],

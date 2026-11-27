@@ -449,7 +449,9 @@ and never raises:
 from ai.common import telemetry
 
 LOGINS = telemetry.Counter(
-    'myorg.auth.login', '{login}', 'Sign-ins by outcome',
+    'myorg.auth.login',
+    '{login}',
+    'Sign-ins by outcome',
     attributes={'outcome': 'myorg.auth.outcome', 'org': 'rocketride.org.id'},
 )
 

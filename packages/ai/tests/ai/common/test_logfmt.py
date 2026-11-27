@@ -130,13 +130,13 @@ def test_underscore_keys_are_redacted():
         ('hf_abcdefghijklmnopqrstuvwxyz', 'abcdefghijklmnopqrstuvwxyz'),
         ("[type=string_type, input_value='Payroll of Jane Doe 120k', input_type=str]", 'Jane Doe'),
         ('https://user:hunter22@db.example.com:5432/prod?sslmode=require', 'hunter22'),
-        ("{'mistral_api_key': 'Xy7abcdefghij'}", 'Xy7abcdefghij'),
-        ('MISTRAL_API_KEY=Xy7abcdefghij', 'Xy7abcdefghij'),
-        ('aws_secret_access_key = wJalrXUtnFEMIK7MDENG', 'wJalrXUtnFEMIK7MDENG'),
-        ('DefaultEndpointsProtocol=https;AccountName=x;AccountKey=abc123def456==;', 'abc123def456'),
-        ('refresh_token=abcdef123456', 'abcdef123456'),
-        ('Authorization: Token abcdef123456789', 'abcdef123456789'),
-        ('-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----', 'MIIEvQIBADANBg'),
+        ("{'mistral_api_key': 'Xy7abcdefghij'}", 'Xy7abcdefghij'),  # gitleaks:allow
+        ('MISTRAL_API_KEY=Xy7abcdefghij', 'Xy7abcdefghij'),  # gitleaks:allow
+        ('aws_secret_access_key = wJalrXUtnFEMIK7MDENG', 'wJalrXUtnFEMIK7MDENG'),  # gitleaks:allow
+        ('DefaultEndpointsProtocol=https;AccountName=x;AccountKey=abc123def456==;', 'abc123def456'),  # gitleaks:allow
+        ('refresh_token=abcdef123456', 'abcdef123456'),  # gitleaks:allow
+        ('Authorization: Token abcdef123456789', 'abcdef123456789'),  # gitleaks:allow
+        ('-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----', 'MIIEvQIBADANBg'),  # gitleaks:allow
         (
             '{"private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgk\\n-----END PRIVATE KEY-----\\n"}',
             'MIIEvQIBADANBgk',
