@@ -115,7 +115,7 @@ TEST_CASE("store::withPassTraceId") {
 
 TEST_CASE("store::PassIds") {
     SECTION("two passes get different ids") {
-        PassIds ids(true);
+        PassIds ids;
         REQUIRE(ids.current().empty());
 
         auto first = ids.begin();
@@ -133,7 +133,7 @@ TEST_CASE("store::PassIds") {
     }
 
     SECTION("nested enter/leave keeps the outer pass's id") {
-        PassIds ids(true);
+        PassIds ids;
         auto outer = ids.begin();
         REQUIRE(ids.begin() == outer);
         REQUIRE(ids.begin() == outer);
@@ -148,7 +148,7 @@ TEST_CASE("store::PassIds") {
     }
 
     SECTION("an exception between enter and leave ends the pass") {
-        PassIds ids(true);
+        PassIds ids;
         std::string first;
         try {
             first = ids.begin();
@@ -167,7 +167,7 @@ TEST_CASE("store::PassIds") {
     }
 
     SECTION("an exception in a nested level keeps the outer pass") {
-        PassIds ids(true);
+        PassIds ids;
         auto outer = ids.begin();
         try {
             ids.begin();
@@ -182,7 +182,7 @@ TEST_CASE("store::PassIds") {
     }
 
     SECTION("a level never goes below zero") {
-        PassIds ids(true);
+        PassIds ids;
         ids.unwind();
         REQUIRE(ids.end().empty());
         REQUIRE(ids.level() == 0);
@@ -192,17 +192,9 @@ TEST_CASE("store::PassIds") {
         REQUIRE(ids.end() == id);
     }
 
-    SECTION("off: no ids and the trace text is unchanged") {
-        PassIds ids(false);
-        REQUIRE_FALSE(ids.on());
-        auto id = ids.begin();
-        REQUIRE(id.empty());
-        REQUIRE(ids.current().empty());
-        REQUIRE(ids.level() == 0);
-        REQUIRE(withPassTraceId(R"({"lane":"text"})", id) ==
+    SECTION("off (no id, as the Debugger passes it): the trace text is unchanged") {
+        REQUIRE(withPassTraceId(R"({"lane":"text"})", std::string{}) ==
                 R"({"lane":"text"})");
-        REQUIRE(ids.end().empty());
-        ids.unwind();
-        REQUIRE(ids.level() == 0);
+        REQUIRE(withPassTraceId("", std::string{}).empty());
     }
 }

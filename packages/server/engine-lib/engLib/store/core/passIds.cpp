@@ -41,14 +41,12 @@ std::string withPassTraceId(std::string trace, const std::string &traceId) {
 }
 
 std::string PassIds::begin() noexcept {
-    if (!m_on) return {};
     std::lock_guard<std::mutex> guard(m_lock);
     if (m_level++ == 0) m_id = newId();
     return m_id;
 }
 
 std::string PassIds::end() noexcept {
-    if (!m_on) return {};
     std::lock_guard<std::mutex> guard(m_lock);
     std::string id = m_id;
     endLevelLocked();
@@ -56,19 +54,16 @@ std::string PassIds::end() noexcept {
 }
 
 void PassIds::unwind() noexcept {
-    if (!m_on) return;
     std::lock_guard<std::mutex> guard(m_lock);
     endLevelLocked();
 }
 
 std::string PassIds::current() const noexcept {
-    if (!m_on) return {};
     std::lock_guard<std::mutex> guard(m_lock);
     return m_id;
 }
 
 int PassIds::level() const noexcept {
-    if (!m_on) return 0;
     std::lock_guard<std::mutex> guard(m_lock);
     return m_level;
 }

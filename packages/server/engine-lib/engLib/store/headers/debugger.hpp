@@ -309,7 +309,7 @@ private:
     /// The levels of nested debugEnter/debugLeave calls and the current
     /// pass's trace id (passTraceId). Used only with --otel_pass_ids while the
     /// app monitor is on; the debugger checks both on every call.
-    PassIds m_passIds{true};
+    PassIds m_passIds;
 
     /// Collection of encoded breakpoint identifiers (e.g., ("A", "B", "text")
     std::mutex m_breakpoint_lock;  ///< Mutex for guarding breakpoint list

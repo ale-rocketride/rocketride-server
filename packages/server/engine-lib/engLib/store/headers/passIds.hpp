@@ -52,17 +52,15 @@ std::string withPassTraceId(std::string trace, const std::string &traceId);
  * and leave from other threads, so the level and the id change together under
  * one lock.
  *
- * Off (PassIds(false)): no ids and no level tracking; every call returns an
- * empty id.
+ * Off is the caller's: the Debugger calls it only with --otel_pass_ids on a
+ * monitored run, and otherwise uses an empty id.
  */
 class PassIds {
 public:
-    explicit PassIds(bool on) noexcept : m_on(on) {}
+    PassIds() noexcept = default;
     PassIds(const PassIds &) = delete;
     PassIds &operator=(const PassIds &) = delete;
 
-    /// Whether pass ids are on
-    bool on() const noexcept { return m_on; }
 
     /// One level more; at the outermost level a new pass with a new id.
     /// Returns the id of the pass this level belongs to.
@@ -76,10 +74,10 @@ public:
     /// call): the pass still ends with its outermost level.
     void unwind() noexcept;
 
-    /// The current pass's id; empty between passes and when off
+    /// The current pass's id; empty between passes
     std::string current() const noexcept;
 
-    /// The current nesting level (0 between passes and when off)
+    /// The current nesting level (0 between passes)
     int level() const noexcept;
 
     /// A new W3C trace id: 32 lowercase hex chars, never all zero
@@ -89,7 +87,6 @@ private:
     // One level less (never below zero); at zero the pass is over. Under m_lock.
     void endLevelLocked() noexcept;
 
-    const bool m_on;
     int m_level = 0;
     std::string m_id;
     mutable std::mutex m_lock;
