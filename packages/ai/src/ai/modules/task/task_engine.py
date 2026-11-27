@@ -70,6 +70,9 @@ from ai.common.rocketride_db import DB_PROVIDERS, db_target, dsn_key, exposes_pu
 from ai.modules.task import node_store
 from ai.modules.task.pipeflow import apply_pipeflow_event
 from ai.modules.task.run_log import RunLogWriter
+from ai.modules.task import error_log, oom
+from ai.modules.task.run_outcome import classify_error_type, classify_run_outcome
+from ai.common import telemetry
 from ai.modules.task.task_channel import (
     ChannelRefused,
     ChannelReply,
@@ -484,6 +487,15 @@ def _is_saas_engine() -> bool:
         return False
 
 
+# Credit checks before a pipe opens: allowed, refused (e.g. OUT_OF_CREDITS) or the ledger unavailable
+SPEND_CHECKS = telemetry.Counter(
+    'rocketride.billing.spend_checks',
+    '{check}',
+    'Credit checks before a pipe opens, by result',
+    attributes={'outcome': 'rocketride.billing.outcome', 'org': 'rocketride.org.id'},
+)
+
+
 async def _check_spend(task: 'Task', arguments: Dict[str, Any], data: Optional[bytes]) -> ChannelReply:
     """Answer a task's credit check: no refusal, or why its org may not open a pipe."""
     from ai.account import account
@@ -493,7 +505,11 @@ async def _check_spend(task: 'Task', arguments: Dict[str, Any], data: Optional[b
     except Exception as e:
         # The ledger's error stays in the server log; the task gets a fixed one
         warning(f'Credit check failed for org {task.org_id}: {e}')
+        SPEND_CHECKS.add(outcome='unavailable', org=task.org_id)
         raise ChannelRefused(CONST_BILLING_UNAVAILABLE) from None
+    SPEND_CHECKS.add(
+        outcome='allowed' if not refusal else (refusal if isinstance(refusal, str) else 'refused'), org=task.org_id
+    )
     return ChannelReply(body={'refusal': refusal})
 
 
@@ -550,6 +566,8 @@ class Task(DAPBase):
         _termination_lock (asyncio.Lock): Atomic termination operations
     """
 
+    # The run's error log (set per instance in __init__; a no-op until then)
+    _error_log: 'error_log.TaskErrorLog | error_log.Disabled' = error_log.Disabled()
     # The run ID this run's hosted models pass was issued for; None when it has none
     _model_run_id: Optional[str] = None
     # Renews that pass while the task runs; cancelled with the pass
@@ -732,6 +750,10 @@ class Task(DAPBase):
         # This run's crash, as the console shows it, and whether the server killed the process
         self._crash: Optional[str] = None
         self._process_killed = False
+        # The signal that ended the process (SIGKILL, SIGSEGV...), and the container's OOM
+        # kill count when it started: why a run was killed, on its trace and metrics
+        self._exit_signal: Optional[str] = None
+        self._oom_kills_at_start: Optional[int] = None
 
         # Server reference, and the runtime it starts tasks with
         self._server = server
@@ -771,6 +793,20 @@ class Task(DAPBase):
 
         # Lifecycle state
         self._stop_requested = False
+        # The pipeline came up (RUNNING) since the last start: an error before it
+        # is a failed start (classify_error_type)
+        self._reached_running = False
+        # The first stop of this start found the process still running (it was
+        # stopped, it did not exit on its own): classify_error_type
+        self._stop_interrupted = False
+        # The engine error code of the subprocess's >EXIT, when it sent one
+        self._exit_error_code: Optional[str] = None
+        # The run's errors on the server's own output, with its trace id
+        # (error_log: only when telemetry or RR_LOG_FORMAT is on)
+        self._error_log = error_log.for_task(id, lambda: self.org_id or '', lambda: self.project_id or '')
+        # Whether this run's process was started with telemetry's relay (--otel_relay):
+        # only then are its relayed dependency records (>SPN*) taken
+        self._otel_relay = False
         # Bumped by every stop_task, so a restart can tell whether a stop arrived
         # while it loaded, even on a task whose last run was already stopped
         self._stop_count = 0
@@ -972,6 +1008,10 @@ class Task(DAPBase):
         if target:
             return target
         return (self.team_id if scope == 'team' else self.client_id) or ''
+
+    def _telemetry_identity(self) -> Dict[str, Any]:
+        """The run's identity for telemetry: the opaque org and project ids and the run kind, nothing personal."""
+        return {'org_id': self.org_id or '', 'run_kind': self._run_kind, 'project_id': self.project_id or ''}
 
     def _db_identity(self, public_endpoint: bool) -> Dict[str, Any]:
         """The run's identity for ``authorize_db_target`` (SDD 4.4)."""
@@ -1617,7 +1657,9 @@ class Task(DAPBase):
             self._redial_later(CONST_CHANNEL_DIAL_WINDOW)
             return
         self._dial_times.append(now)
-        self._dial_task = asyncio.create_task(self._open_data_channel(stale=client))
+        self._dial_task = asyncio.create_task(
+            self._open_data_channel(stale=client), context=telemetry.detached_context()
+        )
         self._dial_task.add_done_callback(self._after_dial)
 
     def _after_dial(self, _dial: asyncio.Task) -> None:
@@ -1864,6 +1906,15 @@ class Task(DAPBase):
                     pass
         return engine.returncode
 
+    def _exit_cause(self) -> Optional[Dict[str, Any]]:
+        """How the process ended, when a signal ended it: the signal, and whether an OOM kill is suspected."""
+        if not self._exit_signal:
+            return None
+        return {
+            'signal': self._exit_signal,
+            'oom_suspected': oom.suspected(self._oom_kills_at_start, self._exit_signal),
+        }
+
     def _apply_process_exit_code(self, exit_code: Optional[int]) -> None:
         """Record the subprocess exit code when the task sent no >EXIT event this run.
 
@@ -1887,6 +1938,7 @@ class Task(DAPBase):
                     name = signal.Signals(-exit_code).name
                 except ValueError:
                     return
+                self._exit_signal = name
                 if name in CONST_CRASH_SIGNALS:
                     self._crash = f'{name} (code {-exit_code})'
             elif exit_code in CONST_CRASH_EXCEPTIONS:
@@ -2170,22 +2222,52 @@ class Task(DAPBase):
         # is NOT a new run: the chapter continues and only a restart marker
         # is recorded; a real termination completes the chapter with its
         # outcome. Best-effort — never blocks or breaks teardown.
+        #
+        # The outcome comes from the stop request and exit code, not the
+        # state: an abnormal exit is CANCELLED too, and must read as error.
+        # Telemetry counts the same outcome the run log records.
+        outcome = None
+        if not self._is_restarting:
+            # Pure: the run log always gets an outcome
+            outcome = classify_run_outcome(self._stop_requested, self._stop_reason, self._status.exitCode)
+            # A crash nobody asked for is an error whatever the exit code read
+            if self._crash and not self._stop_requested:
+                outcome = 'error'
+            try:
+                # A traceback still being collected is written now, before the run's
+                # trace is decided (an error log keeps it)
+                self._error_log.flush()
+                telemetry.task_ended(
+                    self.id,
+                    self._telemetry_identity(),
+                    outcome,
+                    self._stop_reason if self._stop_requested else None,
+                    classify_error_type(
+                        self._stop_reason,
+                        # No launch: the runtime never started the task (start_failed),
+                        # whatever exit code the status fell back to
+                        self._status.exitCode if self._launch is not None else None,
+                        self._reached_running,
+                        self._stop_interrupted,
+                        self._exit_error_code,
+                    )
+                    if outcome == 'error'
+                    else None,
+                    self._exit_error_code if outcome == 'error' else None,
+                    self._error_log.first if outcome == 'error' else None,
+                    self._exit_cause() if outcome == 'error' else None,
+                )
+            except Exception as e:
+                # Best-effort: never blocks or breaks teardown
+                self.debug_message(f'Run error log or telemetry failed: {e}')
+
         if self._run_log is not None:
             try:
                 if self._is_restarting:
                     self._run_log.note_restart()
                 else:
-                    # A ttl-window expiry is SUCCESS: the run stayed up
-                    # exactly as configured, then shut down. Only a real
-                    # stop (or abnormal exit) reads as cancelled; a crash is an error.
-                    if self._crash and not self._stop_requested:
-                        outcome = 'error'
-                    elif self._status.state == TASK_STATE.CANCELLED.value:
-                        outcome = 'ok' if self._stop_reason == 'ttl' else 'cancelled'
-                    elif self._status.exitCode == 0:
-                        outcome = 'ok'
-                    else:
-                        outcome = 'error'
+                    # The outcome computed above (classify_run_outcome, a crash
+                    # nobody asked for an error): the run log and telemetry agree
                     await self._run_log.end_run(outcome, self._status.exitMessage or '', reason=self._stop_reason)
                     self._run_log = None
             except Exception as e:
@@ -2396,6 +2478,10 @@ class Task(DAPBase):
             except Exception as e:
                 self.debug_message(f'Run-log append failed: {e}')
 
+        # Telemetry is derived from the same event (a no-op unless enabled)
+        # (the identity is passed uncalled: built only when telemetry is on and needs it)
+        telemetry.task_event(self.id, message, self._telemetry_identity)
+
         # Route debug events to debugger
         if type & EVENT_TYPE.DEBUGGER:
             # If we have an attach debugger
@@ -2453,6 +2539,7 @@ class Task(DAPBase):
         elif event_type == 'apaevt_status_error':
             error_message = body.get('message', '')
             self._status.errors.append(error_message)
+            self._error_log.node_error(error_message)
 
             if len(self._status.errors) > CONST_STATUS_HISTORY_LIMIT:
                 self._status.errors = self._status.errors[-CONST_STATUS_HISTORY_LIMIT:]
@@ -2538,15 +2625,27 @@ class Task(DAPBase):
         Args:
             message: Event message from subprocess
         """
+        # Extract event details
+        event_type = message.get('event', '')
+        body = message.get('body', {})
+
+        # Any other event: a traceback that ended on stderr is written now (it waits
+        # one line to tell a chained exception from the end)
+        if event_type != 'output':
+            self._error_log.settle()
+
+        # A node's dependency calls are for telemetry only: not forwarded, and not
+        # activity (neither the idle timer nor the stalled-start check moves for them)
+        if event_type == 'apaevt_dependency':
+            if self._otel_relay:
+                telemetry.dependency_relayed(self.id, body, self._pipeline)
+            return
+
         # Update event timing
         self._last_event_time = time.time()
 
         # Add task token for correlation
         message['__id'] = self.id
-
-        # Extract event details
-        event_type = message.get('event', '')
-        body = message.get('body', {})
 
         # Channel signals are for this Task alone: not forwarded, not activity
         if event_type == 'apaevt_channel':
@@ -2573,6 +2672,7 @@ class Task(DAPBase):
 
             if service_up:
                 self._status.state = TASK_STATE.RUNNING.value
+                self._reached_running = True
                 self._status.notes = self._service_up_notes
             else:
                 self._status.notes = self._service_down_notes
@@ -2600,6 +2700,12 @@ class Task(DAPBase):
                 self._status.exitCode = exit_code
                 self._status.exitMessage = exit_message
             self._exit_event_seen = True
+            # The engine error code's name (run_outcome.classify_error_type)
+            self._exit_error_code = body.get('errorCode')
+            # A requested stop's exit is not an error
+            self._error_log.exited(
+                0 if getattr(self, '_stop_requested', False) else exit_code, exit_message, self._exit_error_code
+            )
 
             # The engine's handlers caught a crash: its >EXIT code is Crash
             if body.get('crash'):
@@ -2615,6 +2721,15 @@ class Task(DAPBase):
             pipe_index = body.get('id', '')
             component_name = body.get('pipe_id', '')
             raw_trace = body.get('trace', {})
+
+            # Component timing for telemetry, at every trace level: the engine
+            # sends enter/leave even at 'none', where no flow event is derived.
+            telemetry.component_trace(
+                self.id, operation, pipe_index, component_name, body.get('eventTime'), raw_trace, self._pipeline
+            )
+            # The pass's trace id is for telemetry only: clients see the trace as before
+            if isinstance(raw_trace, dict) and 'tid' in raw_trace:
+                raw_trace = {key: value for key, value in raw_trace.items() if key != 'tid'}
 
             # total_pipes=0 marks a synthetic trace (tool-call events emit it
             # as "unknown") — keep the data lane's real pipe count.
@@ -2691,6 +2806,8 @@ class Task(DAPBase):
         elif event_type == 'output':
             output_message = body.get('output', '')
             debug(output_message)
+            if body.get('category') == 'stderr':
+                self._error_log.stderr(output_message)
 
             self._status_trace.append(output_message)
 
@@ -3129,8 +3246,12 @@ class Task(DAPBase):
             self._final_events_sent = False
             self._terminated_called = False
             self._exit_event_seen = False
+            self._exit_error_code = None
+            self._error_log.reset()
             self._crash = None
             self._process_killed = False
+            self._exit_signal = None
+            self._oom_kills_at_start = oom.oom_kills()
             self._service_up_notes = []
             self._service_down_notes = []
             self._stop_requested = False
@@ -3142,6 +3263,8 @@ class Task(DAPBase):
 
             # Set our current state
             self._status.state = TASK_STATE.STARTING.value
+            self._reached_running = False
+            self._stop_interrupted = False
 
             # Resolve ${...} placeholders into a local variable — never stored on self
             # so secrets are not retained in memory beyond the launch.
@@ -3196,10 +3319,15 @@ class Task(DAPBase):
                         yield arg
 
             # The end of the command line; the runtime puts its own part in front
-            child_args: List[str] = []
+            # Telemetry's pass ids and relay in the run's process (only while it is on),
+            # ahead of the pipeline's own: the task reads the first --otel_relay
+            child_args: List[str] = list(telemetry.child_arguments())
+            self._otel_relay = any(arg.startswith('--otel_relay=') for arg in child_args)
             for arg in _user_args():
-                # Crash dumps are the operator's call, so a pipeline's own --dumps is skipped
-                if arg.split('=', 1)[0].lower() != '--dumps':
+                option = arg.split('=', 1)[0].lower()
+                # Crash dumps are the operator's call, so a pipeline's own --dumps is
+                # skipped; telemetry's options are the server's, never a pipeline's
+                if option != '--dumps' and not option.startswith('--otel_'):
                     child_args.append(arg)
 
             # The engine's own options: --dumps always, trace unless the caller set one
@@ -3234,6 +3362,11 @@ class Task(DAPBase):
             # to end: honour it here instead of starting one
             if self._stop_requested:
                 raise RuntimeError('the task was stopped before it started')
+
+            if self._is_restarting:
+                # Same run, new subprocess: telemetry drops its open calls and
+                # restarts its counts before the new process can report
+                telemetry.task_restarted(self.id)
 
             # The one place the runtimes differ: a child process or a container
             self._launch = await self._launcher.start(
@@ -3361,7 +3494,9 @@ class Task(DAPBase):
             self._status.state = TASK_STATE.INITIALIZING.value
 
             # Create the periodic status update task
-            self._status_update_task = asyncio.create_task(self._status_update_loop())
+            self._status_update_task = asyncio.create_task(
+                self._status_update_loop(), context=telemetry.detached_context()
+            )
 
             # If we are not restarting, notify of task action
             if not self._is_restarting:
@@ -3429,9 +3564,12 @@ class Task(DAPBase):
         Initiate graceful task termination with resource cleanup.
 
         Args:
-            reason: WHY the stop happens — 'user' (explicit request) or
-                'ttl' (the run window elapsed). Drives the recorded run
-                outcome: a ttl expiry is a successful run, not a cancel.
+            reason: WHY the stop happens — one of run_outcome.STOP_REASONS:
+                'user' (explicit request), 'ttl' (the run window elapsed),
+                'disconnect' (the launching client went away), 'unregister',
+                'start_failed' (cleanup of a failed start). Drives the
+                recorded run outcome (classify_run_outcome): a ttl expiry is a
+                successful run, a failed start's cleanup an error, the rest a cancel.
         """
         try:
             # Prevent race conditions
@@ -3440,6 +3578,8 @@ class Task(DAPBase):
                 engine = self._launch
 
                 # Mark as a requested stop and block new operations.
+                if not self._stop_requested:
+                    self._stop_interrupted = engine is not None and engine.returncode is None
                 self._stop_requested = True
                 self._stop_count += 1
                 self._stop_reason = reason

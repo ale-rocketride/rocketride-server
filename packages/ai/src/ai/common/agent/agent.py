@@ -285,7 +285,13 @@ class AgentBase(ABC):
             except Exception as e:
                 error_type = type(e).__name__
                 error_message = str(e)
-                error(f'agent base _run failed run_id={run_id} type={error_type} message={error_message}')
+                # why (a provider's refusal, or the agent's own failure: agent_error,
+                # the platform's) and the question's trace, and the question marked failed
+                from ai.common.llm_base import report_llm_failure
+
+                report_llm_failure(
+                    f'agent base _run failed run_id={run_id}', e, default='agent_error', instance=iInstance
+                )
                 # A driver can raise before it sends any status (agent_rocketride checks its
                 # verify_tool first), so this exit must report its stop reason itself. A
                 # sub-agent does not: its failure is its parent's tool result.

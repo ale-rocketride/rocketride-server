@@ -27,7 +27,7 @@ Deepseek binding for the ChatLLM.
 
 from typing import Any, Dict
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from langchain_openai import ChatOpenAI
 
 
@@ -55,14 +55,14 @@ class Chat(ChatBase):
         # Get the serverbase url
         serverbase = config.get('serverbase')
         if not serverbase:
-            raise ValueError('DeepSeek serverbase is required.')
+            raise ConfigError('DeepSeek serverbase is required.')
 
         # Get the api key, use some dummy key if not provided
         apikey = config.get('apikey') or 'sk-local-dummy-key'
 
         # API key validation logic, only if it's a cloud model, locals do not have the apikey property
         if 'api.deepseek' in serverbase and not apikey.startswith('sk-'):
-            raise ValueError('Invalid DeepSeek API key format, please check your API key.')
+            raise ConfigError('Invalid DeepSeek API key format, please check your API key.')
 
         # Get the llm
         self._llm = ChatOpenAI(

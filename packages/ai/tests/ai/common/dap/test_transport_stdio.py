@@ -411,6 +411,47 @@ async def test_exit_message_three_fields_unknown_token_maps_to_one():
     assert disconnects[0]['has_error'] is True
 
 
+@pytest.mark.parametrize(
+    'line, exit_code, error_code, message',
+    [
+        # What the engine writes (engLib/monitor/App.hpp): the error code's name first
+        (
+            '>EXIT*InvalidSchema*The service no_such_node was not found*services.cpp:2,103',
+            1,
+            'InvalidSchema',
+            'The service no_such_node was not found',
+        ),
+        (
+            '>EXIT*InvalidParam*Component x_1 input has unknown lane x*pipeline_config.cpp:167',
+            1,
+            'InvalidParam',
+            'Component x_1 input has unknown lane x',
+        ),
+        ('>EXIT*Exception*Missing credentials*a*b.py:231', 1, 'Exception', 'Missing credentials*a'),
+        ('>EXIT*Python*Python error*init.cpp:647', 1, 'Python', 'Python error'),
+        # A message holding '*' stays whole: the location is found from the end
+        ('>EXIT*Exception*a * b*x.py:1', 1, 'Exception', 'a * b'),
+        ('>EXIT*InvalidParam*bad * value*services.cpp:2,103', 1, 'InvalidParam', 'bad * value'),
+        # Not a code name: no errorCode (free text never becomes one)
+        ('>EXIT*not a code*msg*x', 1, None, 'msg'),
+        # Success and the numeric forms are unchanged
+        ('>EXIT*0*', 0, None, ''),
+        ('>EXIT*FF*failed', 0xFF, None, 'failed'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_exit_keeps_the_engine_error_code_name(line, exit_code, error_code, message):
+    """The numeric exitCode is unchanged for every consumer; the code's name is passed on as errorCode."""
+    events, _ = await _drive(line)
+    body = _single_event(events)['body']
+    assert body['exitCode'] == exit_code
+    assert body['message'] == message
+    if error_code is None:
+        assert 'errorCode' not in body
+    else:
+        assert body['errorCode'] == error_code
+
+
 @pytest.mark.asyncio
 async def test_exit_message_too_short_dispatches_incomplete_event_and_disconnect():
     """'>EXIT*' (matches the prefix but lacks fields) hits the incomplete-exit branch."""

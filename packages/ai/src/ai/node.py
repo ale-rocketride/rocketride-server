@@ -1,5 +1,6 @@
 import argparse
 import sys
+import traceback
 import asyncio
 import threading
 import time
@@ -454,6 +455,19 @@ def run():
 
     install_gpu_guard()
 
+    # Telemetry: relay the nodes' dependency calls to EaaS when it asked for it
+    # (--otel_relay). Must run before any node class is defined: install() wraps
+    # the handlers of IInstanceBase/IGlobalBase subclasses defined after it (their
+    # calls carry the node's component); a class defined earlier is not wrapped
+    # and is named in a warning. It also registers a depends() after-install
+    # hook. A no-op without --otel_relay (telemetry off).
+    try:
+        from ai.common.telemetry import relay
+
+        relay.install(sys.argv)
+    except Exception as e:
+        debug(f'telemetry relay off: {e}')
+
     # This will actually do the dependency loading and start the main process
     from rocketlib import processArguments, monitorStatus
 
@@ -488,8 +502,14 @@ if __name__ == '__main__':
         # ended abnormally rather than completed.
         sys.exit(1)
 
-    except Exception as e:
-        debug(e)
-
-    except (KeyboardInterrupt, SystemExit):
+    except KeyboardInterrupt:
         pass
+
+    except Exception:
+        # A failure around the engine run (arguments, the channel's web server,
+        # an import) must not read as a run that completed: print it and exit
+        # non-zero, so the process ends in error (before the engine runs there
+        # is no >EXIT line; EaaS then classifies it from the exit code). A
+        # SystemExit (e.g. a bad argument) keeps its code.
+        traceback.print_exc()
+        sys.exit(1)

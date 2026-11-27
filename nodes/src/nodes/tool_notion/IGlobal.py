@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import os
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import IGlobalBase, OPEN_MODE, error, warning
 
 
@@ -53,7 +53,7 @@ class IGlobal(IGlobalBase):
 
         if not apikey:
             error('tool_notion: apikey is required — set it in node config or NOTION_API_KEY env var')
-            raise ValueError('tool_notion: apikey is required')
+            raise ConfigError('tool_notion: apikey is required')
 
         self.apikey = apikey
 

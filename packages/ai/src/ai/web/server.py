@@ -48,6 +48,7 @@ Usage::
     server.run()  # blocking — use server.serve() inside an async context
 """
 
+import logging
 import os
 import signal
 import sys
@@ -68,6 +69,9 @@ from starlette.middleware.gzip import GZipMiddleware
 from starlette.routing import BaseRoute, compile_path
 from rocketlib import debug, warning
 from rocketride import CONST_WS_PING_INTERVAL, CONST_WS_PING_TIMEOUT
+
+# Sign-in failures on our side (an authenticator raising): ERROR lines
+_AUTH_LOG = logging.getLogger('rocketride.auth')
 from ai.constants import CONST_DEFAULT_WEB_PORT, CONST_DEFAULT_WEB_HOST, CONST_WEB_WS_MAX_SIZE
 from ai.web import exception, error, Result
 from ai.account import account, AccountInfo, Reporter
@@ -94,6 +98,42 @@ __all__ = ['WebServer', 'AccountInfo']
 # Shared definition: the task node prints the same art at launch so the run
 # log's console opens with it.
 from ai.logo import LOGO as logo
+
+
+class _ErrorLineLimit:
+    """
+    At most one ERROR line per exception type per window.
+
+    A broken store or identity provider fails every sign-in the same way: one
+    line with the traceback says so; the rest go to the debug log and are
+    counted in the next ERROR line for that type.
+    """
+
+    def __init__(self, window: float = 60.0) -> None:
+        self._window = window
+        self._lock = threading.Lock()
+        # exception type name -> (time of the last ERROR line, calls not logged since)
+        self._seen: Dict[str, Tuple[float, int]] = {}
+
+    def allow(self, key: str) -> Tuple[bool, int]:
+        """Return (log at ERROR now, how many were not logged at ERROR since the last line)."""
+        now = time.monotonic()
+        with self._lock:
+            last, skipped = self._seen.get(key, (0.0, 0))
+            if last and now - last < self._window:
+                self._seen[key] = (last, skipped + 1)
+                return False, skipped + 1
+            self._seen[key] = (now, 0)
+            return True, skipped
+
+    def reset(self) -> None:
+        """Forget every type (tests)."""
+        with self._lock:
+            self._seen.clear()
+
+
+# Sign-in failures on our side: one ERROR line per exception type per minute
+_AUTH_ERROR_LIMIT = _ErrorLineLimit()
 
 
 def _is_restorable_signal_handler(handler: Any) -> bool:
@@ -497,9 +537,16 @@ class WebServer:
         # back to CONST_DEFAULT_SIGNING_KEY (a self-describing development
         # value) so a fresh install works out of the box.
 
-        # Setup the Uvicorn configuration
+        # Setup the Uvicorn configuration. RR_LOG_FORMAT=json logs JSON lines;
+        # otherwise uvicorn's own configuration, unchanged
+        from ai.common import logfmt
+
+        log_config = logfmt.uvicorn_log_config()
+        # every module's ERROR as a JSON line (sign-in, billing, stores): the log pipeline keeps it
+        logfmt.install_error_handler()
         config = uvicorn.Config(
             self.app,
+            **({'log_config': log_config} if log_config else {}),
             log_level='info',
             host=host,
             port=port,
@@ -577,14 +624,30 @@ class WebServer:
                     # This authenticator did not recognise the credential; try the next one
                     continue
                 return account_info
-            except PermissionError as e:
-                # Authenticator explicitly denied access (known-bad credential)
-                debug(f'auth: PermissionError from authenticator: {str(e)}')
-                return (401, 'Authentication failed')
             except Exception as e:
-                # Authenticator raised an unexpected error — treat as a bad-request failure
-                debug(f'auth: authenticator raised unexpected error: {str(e)}')
-                return (400, 'Bad request')
+                from ai.modules.task.types import TaskError
+
+                if isinstance(e, (TaskError, PermissionError)):
+                    # The caller's credential, not our failure: an authenticator
+                    # denied it (PermissionError) or a run key names no live run
+                    # (TaskError: stopped, replaced, an engine restart)
+                    debug(f'auth: credential refused by an authenticator: {type(e).__name__}')
+                    return (401, 'Authentication failed')
+                # Our failure (a store, the identity provider, a bug), not the
+                # caller's: a 5xx so the sign-in SLO counts it, and an ERROR line
+                # with the traceback once per exception type per minute
+                kind = type(e).__name__
+                log_now, skipped = _AUTH_ERROR_LIMIT.allow(kind)
+                if log_now:
+                    _AUTH_LOG.error(
+                        'auth: an authenticator failed (not the credential)'
+                        + (f'; {skipped} more {kind} since the last line' if skipped else ''),
+                        exc_info=True,
+                        extra={'auth_stage': 'authenticator', 'error_type': 'authenticator_error'},
+                    )
+                else:
+                    debug(f'auth: an authenticator failed again ({kind}, {skipped} since the last ERROR line)')
+                return (500, 'Authentication service error')
 
         # No registered authenticator matched; fall back to the built-in account authenticator
         try:

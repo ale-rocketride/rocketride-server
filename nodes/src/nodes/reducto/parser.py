@@ -24,7 +24,7 @@
 from typing import Any, Dict, Optional, List
 from ai.common.reader import ReaderBase
 from ai.common.config import Config
-from rocketlib import debug
+from rocketlib import debug, error
 
 
 class Parser(ReaderBase):
@@ -197,7 +197,7 @@ class Parser(ReaderBase):
             return text_content, table_content
 
         except Exception as e:
-            debug(f'Error parsing document with Reducto: {str(e)}')
+            error(f'Error parsing document with Reducto: {str(e)}')
             import traceback
 
             debug(f'Full traceback: {traceback.format_exc()}')

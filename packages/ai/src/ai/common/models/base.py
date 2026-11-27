@@ -42,6 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from rocketride import RocketRideClient
 from ai import node as ai_node
+from ai.common import telemetry
 
 
 # =============================================================================
@@ -480,20 +481,23 @@ class ModelClient(RocketRideClient):
         Raises:
             Exception: If command fails and retry_on_error is False, or if retry fails
         """
-        # Run async command on global event loop
-        future = asyncio.run_coroutine_threadsafe(
-            self._send_command_async(command, arguments, retry_on_error), ai_node.server_loop
-        )
-        body = future.result()  # Block until complete
+        # Run async command on global event loop. Telemetry times the request
+        # (retries included) and, in a pipeline pass, sends its trace along;
+        # a no-op while telemetry is off.
+        with telemetry.model_server_call(self, command) as call:
+            future = asyncio.run_coroutine_threadsafe(
+                call.traced(self._send_command_async(command, arguments, retry_on_error)), ai_node.server_loop
+            )
+            body = future.result()  # Block until complete
 
-        # Record server-reported perf counters (preprocess, gpu, postprocess,
-        # queue_wait, latency) into the metrics singleton — one call covers
-        # all model wrappers that go through ModelClient
-        perf = body.get('perf') if isinstance(body, dict) else None
-        if perf:
-            from ai.web.metrics import metrics
+            # Record server-reported perf counters (preprocess, gpu, postprocess,
+            # queue_wait, latency) into the metrics singleton — one call covers
+            # all model wrappers that go through ModelClient
+            perf = body.get('perf') if isinstance(body, dict) else None
+            if perf:
+                from ai.web.metrics import metrics
 
-            metrics.add_time(perf)
+                metrics.add_time(perf)
 
         return body
 

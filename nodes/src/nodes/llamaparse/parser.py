@@ -32,7 +32,7 @@ from typing import Any, Dict, Optional
 from ai.common.reader import ReaderBase
 from ai.common.config import Config
 from ai.web.metrics import metrics
-from rocketlib import debug
+from rocketlib import debug, error
 
 
 class Parser(ReaderBase):
@@ -345,7 +345,7 @@ class Parser(ReaderBase):
                 'parsing_metadata': {},
             }
         except Exception as e:
-            debug(f'Error parsing document with LlamaParse: {str(e)}')
+            error(f'Error parsing document with LlamaParse: {str(e)}')
             return {
                 'text': '',
                 'structured_data': [],

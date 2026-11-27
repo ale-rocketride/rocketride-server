@@ -97,6 +97,7 @@ def _install_stubs() -> None:
         pass
 
     mod_config.Config = Config
+    mod_config.ConfigError = type('ConfigError', (ValueError,), {})
     sys.modules['ai.common.config'] = mod_config
 
     mod_utils = types.ModuleType('ai.common.utils')

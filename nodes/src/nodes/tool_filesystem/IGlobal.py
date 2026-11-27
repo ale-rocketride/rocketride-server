@@ -44,7 +44,7 @@ from __future__ import annotations
 import re
 from enum import IntEnum
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import IGlobalBase, OPEN_MODE, warning
 
 
@@ -133,9 +133,9 @@ class IGlobal(IGlobalBase):
             try:
                 raw = json.loads(str(raw))
                 if not isinstance(raw, list):
-                    raise ValueError(f'pathWhitelist must be a JSON array, got {type(raw).__name__}')
+                    raise ConfigError(f'pathWhitelist must be a JSON array, got {type(raw).__name__}')
             except (json.JSONDecodeError, TypeError, ValueError) as e:
-                raise ValueError(f'pathWhitelist is malformed and cannot be parsed: {e}') from e
+                raise ConfigError(f'pathWhitelist is malformed and cannot be parsed: {e}') from e
 
         patterns: list[re.Pattern] = []
         for row in raw:

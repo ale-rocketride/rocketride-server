@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import os
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import IGlobalBase, OPEN_MODE, error, warning
 
 # Pipeline env vars must be ROCKETRIDE_-prefixed (only those are substituted,
@@ -66,7 +66,7 @@ class IGlobal(IGlobalBase):
 
         if not apikey:
             error(f'tool_deepl: apikey is required — set it in node config or the {DEEPL_API_KEY_ENV} env var')
-            raise ValueError('tool_deepl: apikey is required')
+            raise ConfigError('tool_deepl: apikey is required')
 
         self.apikey = apikey
 

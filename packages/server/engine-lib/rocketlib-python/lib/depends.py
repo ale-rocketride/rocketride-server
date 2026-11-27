@@ -41,7 +41,7 @@ import sys
 import threading
 import time
 from glob import glob
-from typing import Optional
+from typing import Callable, Optional
 
 # Conditional imports for cross-platform file locking (both are built-in)
 if os.name == 'nt':
@@ -98,6 +98,13 @@ def _tool_spec(name: str) -> str:
 
 # Track processed requirements to avoid redundant installs in same session
 _processed: set[str] = set()
+
+# Called with the requirements path (absolute, or None) each time depends()
+# finishes its install step, outside the install lock: code that must see the
+# packages a node has just installed registers here (telemetry records a
+# driver's calls this way, only while it is on). A hook that raises is logged
+# and skipped; it never fails depends().
+after_install_hooks: list[Callable[[Optional[str]], None]] = []
 
 
 # ---------------------------------------------------------------------------
@@ -1367,6 +1374,17 @@ def depends(requirements: Optional[str] = None):
 
         # Phase 4: Apply platform-specific hacks (after packages may have been installed)
         _apply_pywin32_hack()
+
+    _run_after_install_hooks(requirements)
+
+
+def _run_after_install_hooks(requirements: Optional[str]) -> None:
+    """Call each after_install_hooks entry; a failing hook never breaks depends()."""
+    for hook in list(after_install_hooks):
+        try:
+            hook(requirements)
+        except Exception as e:
+            debug(f'  after-install hook {getattr(hook, "__name__", hook)!r} failed: {e}')
 
 
 def load_depends(current_file: str, requirements_file: str = 'requirements.txt') -> None:

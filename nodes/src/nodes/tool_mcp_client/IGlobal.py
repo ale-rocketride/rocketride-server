@@ -46,7 +46,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import IGlobalBase, OPEN_MODE, warning
 
 
@@ -387,25 +387,25 @@ def parse_allowed_tools(raw: Any) -> Optional[set]:
         try:
             raw = json.loads(str(raw))
         except (json.JSONDecodeError, ValueError) as e:
-            raise ValueError(f'allowedTools is malformed and cannot be parsed: {e}') from e
+            raise ConfigError(f'allowedTools is malformed and cannot be parsed: {e}') from e
     if isinstance(raw, str):
         stripped = raw.strip()
         if stripped.startswith(('[', '{')):
             try:
                 raw = json.loads(stripped)
             except (json.JSONDecodeError, ValueError) as e:
-                raise ValueError(f'allowedTools is malformed and cannot be parsed: {e}') from e
+                raise ConfigError(f'allowedTools is malformed and cannot be parsed: {e}') from e
         else:
             raw = re.split(r'[,\n]', stripped)
     if not isinstance(raw, list):
-        raise ValueError('allowedTools must be a list of tool names')
+        raise ConfigError('allowedTools must be a list of tool names')
     names = set()
     for item in raw:
         if hasattr(item, 'get'):
             # A blank row is ignored, but a row naming its tool under another
             # key must not leave the list empty and expose every tool.
             if item and item.get('toolName') is None:
-                raise ValueError(f'allowedTools row {item!r} has no toolName')
+                raise ConfigError(f'allowedTools row {item!r} has no toolName')
             item = item.get('toolName')
         name = str(item or '').strip()
         if name:

@@ -91,6 +91,7 @@ from ai.constants import (
     CONST_TASK_TOKEN_KEY_ENV,
     CONST_TASK_TOKEN_KEY_MIN_LENGTH,
 )
+from ai.common import telemetry
 from ai.common.dap import TransportWebSocket, DAPBase
 from rocketride import TASK_STATUS, EVENT_TYPE
 from ai.web import WebServer
@@ -101,6 +102,8 @@ from .authz_recheck import REBUILD_TIMEOUT, AuthzRecheck
 from .task_engine import Task
 from .launcher import Launcher, create_launcher
 from .types import LAUNCH_TYPE, TaskError
+from .lost_runs import LostRuns
+from . import connections
 from .pipeline import resolve_implied_source
 from .commands.cmd_monitor import owner_key
 
@@ -327,6 +330,9 @@ class TaskServer(DAPBase):
 
         # Initialize registries for connection and task management
         self._task_control: Dict[str, TASK_CONTROL] = {}  # Task registry and metadata
+        # A refused run key's customer, project and source, as one ERROR line per lost run;
+        # a tk_ is rebuilt with this engine's token key, as start_task mints it
+        self._lost_runs = LostRuns(task_token=lambda content: keyed_task_token(self._task_token_key(), content))
         self._connections: Dict[int, TaskConn] = {}  # Active client connections
         self._connection_id = 0  # Monotonic connection identifier generator
         self._unauthed_by_ip: Dict[str, int] = {}  # Count of unauthenticated connections per client IP
@@ -370,6 +376,13 @@ class TaskServer(DAPBase):
 
         # Register authentication handler for our keys
         server.add_authenticator(self.authenticate)
+
+        # Open client connections, as a telemetry gauge (a no-op unless enabled)
+        telemetry.observe_connections(lambda: len(self._connections))
+        # ... and per customer, with the people signed in (rocketride.ws.connections, .users)
+        connections.observe(lambda: self._connections.values())
+        # ... and how full the per-address unauthenticated slots are (connections refused)
+        connections.observe_unauthenticated_slots(lambda: self._unauthed_by_ip.values())
 
         # Initialize DAP base class with server identification
         super().__init__('SERVER', **kwargs)
@@ -651,6 +664,7 @@ class TaskServer(DAPBase):
         # Remove connection from active connections registry
         if connection_id in self._connections:
             del self._connections[connection_id]
+            connections.disconnected(conn, getattr(conn, '_opened_mono', None))
 
         # If this connection never authenticated, release its unauthenticated slot
         if not getattr(conn, '_authenticated', False):
@@ -689,7 +703,7 @@ class TaskServer(DAPBase):
 
                 # Auto-terminate launched tasks when the launching client disconnects
                 if control.launch_type == LAUNCH_TYPE.LAUNCH and control.launch_owner == conn:
-                    await control.task.stop_task()
+                    await control.task.stop_task(reason='disconnect')
                     self.debug_message(f'Auto-terminated launched task "{control.id}" after client disconnect')
 
             except Exception as e:
@@ -790,6 +804,7 @@ class TaskServer(DAPBase):
                     control,
                     ['task.control', 'task.data', 'task.monitor', 'task.debug', 'task.store'],
                 )
+            self._refused(authorization)
             raise TaskError(TaskError.NOT_REGISTERED, 'Your pipeline is not running')
 
         # Not a task key — delegate to account layer
@@ -899,6 +914,48 @@ class TaskServer(DAPBase):
             raise TaskError(TaskError.AMBIGUOUS, 'Multiple pipelines are running for this project; specify a scope')
         raise TaskError(TaskError.NOT_REGISTERED, 'Your pipeline is not running')
 
+    def _refused(self, key: str) -> None:
+        """
+        A call with run key `key` was refused: LostRuns names the lost run (when there is one).
+
+        Never raises: this runs on the sign-in path, where a failure here would
+        turn the caller's 401 into a 500.
+        """
+        lost_runs = getattr(self, '_lost_runs', None)
+        if lost_runs is None:
+            return
+        try:
+            lost_runs.refused(key)
+        except Exception as e:
+            debug(f'lost runs: could not record a refused run key: {type(e).__name__}')
+
+    def live_identities(self) -> List[Dict[str, Any]]:
+        """The telemetry identity (org, run kind, project) of every run in progress (LiveRuns)."""
+        out = []
+        for control in self._task_control.values():
+            task = control.task
+            # A finished run stays registered a few minutes (cleanup delay): not in progress
+            complete = getattr(task, 'is_task_complete', None)
+            if task is None or (callable(complete) and complete()):
+                continue
+            identity = getattr(task, '_telemetry_identity', None)
+            if callable(identity):
+                out.append({**identity(), 'task_id': str(getattr(control.task, 'id', '') or '')})
+        return out
+
+    def find_public_control(self, public_auth: str) -> Optional[TASK_CONTROL]:
+        """
+        The live run a pk_ key reaches, or None. Only looks: a miss is not counted
+        as a refused call (telemetry naming a request's run must not add to the
+        lost runs).
+        """
+        # A run whose source is not a public endpoint does not answer to its pk_
+        # (see authenticate)
+        for control in self._task_control.values():
+            if control.public_auth == public_auth and public_key_reaches(control):
+                return control
+        return None
+
     def get_task_control_by_public_key(self, public_auth: str) -> TASK_CONTROL:
         """
         Retrieve task control structure with a given project/source id.
@@ -912,13 +969,14 @@ class TaskServer(DAPBase):
         Raises:
             TaskError: Code TASK_NOT_REGISTERED if the key names no live task
         """
-        # Look for it. A run whose source is not a public endpoint does not
-        # answer to its pk_ (see authenticate).
-        for control in self._task_control.values():
-            if control.public_auth == public_auth and public_key_reaches(control):
-                return control
+        control = self.find_public_control(public_auth)
+        if control is not None:
+            return control
 
-        # Couldn't find it
+        # Couldn't find it. A lost run only when no live run has the key (a live
+        # run that is not a public endpoint is refused the same way, but not lost)
+        if not any(control.public_auth == public_auth for control in self._task_control.values()):
+            self._refused(public_auth)
         raise TaskError(TaskError.NOT_REGISTERED, 'Your pipeline is not running')
 
     def get_task_control(
@@ -943,6 +1001,7 @@ class TaskServer(DAPBase):
 
         control = self._task_control.get(token, None)
         if not control:
+            self._refused(token)
             raise TaskError(TaskError.NOT_REGISTERED, 'Your pipeline is not running')
 
         # Run-scoped resolution (user-owned runs are owner-private; team
@@ -1427,7 +1486,7 @@ class TaskServer(DAPBase):
             raise TaskError(TaskError.NOT_REGISTERED, 'Your pipeline is not running')
 
         # Ensure task is properly stopped and resources are cleaned up
-        await control.task.stop_task()
+        await control.task.stop_task(reason='unregister')
 
         # Remove monitor subscriptions that reference this task from all
         # connections — keys are owner-scoped, so build from the control
@@ -1831,7 +1890,7 @@ class TaskServer(DAPBase):
                 # consuming resources and reporting stale metrics.
                 if control.task:
                     try:
-                        await asyncio.wait_for(control.task.stop_task(), timeout=30)
+                        await asyncio.wait_for(control.task.stop_task(reason='start_failed'), timeout=30)
                     except asyncio.TimeoutError:
                         self.debug_message(f'Warning: timed out stopping orphaned task: {control.id}')
                     except Exception:
@@ -2167,6 +2226,7 @@ class TaskServer(DAPBase):
         client_ip = websocket.client.host if websocket.client else ''
         current_unauthed = self._unauthed_by_ip.get(client_ip, 0)
         if client_ip and current_unauthed >= CONST_MAX_UNAUTHED_CONNS_PER_IP:
+            connections.refused(connections.REFUSED_PER_IP)
             await websocket.close(code=1008)  # 1008 = Policy Violation
             return
         # Global cap on number of distinct IPs holding slots: per-IP decrement
@@ -2174,6 +2234,7 @@ class TaskServer(DAPBase):
         # many IPs (each at 1 slot) can still grow _unauthed_by_ip unbounded.
         # Reject new IPs once the table is full; existing IPs keep working.
         if client_ip and client_ip not in self._unauthed_by_ip and len(self._unauthed_by_ip) >= CONST_MAX_UNAUTHED_IPS:
+            connections.refused(connections.REFUSED_IP_TABLE_FULL)
             await websocket.close(code=1008)  # 1008 = Policy Violation
             return
         if client_ip:

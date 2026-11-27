@@ -105,6 +105,7 @@ def _load_iglobal(monkeypatch, config_overrides: dict | None = None, error_name:
 
     chat_module.ChatBase = ChatBase
     config_module.Config = Config
+    config_module.ConfigError = type('ConfigError', (ValueError,), {})
     config_module.check_credential_resolved = lambda *args, **kwargs: None
     config_module.warn_if_credential_unresolved = lambda *args, **kwargs: False
     rocketlib_module.IGlobalBase = IGlobalBase

@@ -28,7 +28,7 @@ from depends import depends  # type: ignore
 from typing import Any
 from ai.common.schema import Answer, Question
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 
 # Load requirements
 requirements = os.path.dirname(os.path.realpath(__file__)) + '/requirements.txt'
@@ -107,11 +107,11 @@ class Chat(ChatBase):
         self._prompt = config.get('accessibility.prompt') or config.get('prompt') or DEFAULT_PROMPT
 
         if not api_key:
-            raise ValueError('Missing Google AI API key. Get one at https://aistudio.google.com/apikey')
+            raise ConfigError('Missing Google AI API key. Get one at https://aistudio.google.com/apikey')
 
         # Validate the API key format
         if api_key.startswith('sk-'):
-            raise ValueError(
+            raise ConfigError(
                 'Invalid API key format. This appears to be an OpenAI key. Please provide a Google AI API key.'
             )
 

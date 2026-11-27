@@ -69,6 +69,38 @@ def _stop_kwargs() -> dict:
     return {'stop': stop} if stop else {}
 
 
+class _ModelCall:
+    """One logical model call (chat_string, chat_turn): its start, the retried failures, the last swallowed one."""
+
+    __slots__ = ('started', 'retries', 'failure')
+
+    def __init__(self) -> None:
+        self.started = time.time_ns()
+        self.retries: list = []  # (time ns, error kind, wait s) per failed try that was retried
+        self.failure: Optional[BaseException] = None  # the error that ended it, when not raised
+
+    def retried(self, error: BaseException, wait: float) -> None:
+        self.retries.append((time.time_ns(), _error_kind(error), wait))
+
+
+class _StreamBroken(Exception):
+    """A streamed answer that ended with an error after output reached the UI."""
+
+
+# The model call being made in this context (set by chat_string and chat_turn)
+_MODEL_CALL: contextvars.ContextVar[Optional[_ModelCall]] = contextvars.ContextVar('chat_model_call', default=None)
+
+
+def _error_kind(error: BaseException) -> str:
+    """A bounded kind for a failed model call (provider_unavailable, provider_auth, ...)."""
+    try:
+        from ai.common.llm_base import provider_error_type
+
+        return provider_error_type(error)
+    except Exception:
+        return type(error).__name__
+
+
 class ChatBase:
     """
     Abstract base class for all chat drivers with configurable token allocation.
@@ -135,6 +167,8 @@ class ChatBase:
         # Load the provider-specific configuration using the Config utility
         # This will merge default settings with provider-specific overrides
         config = Config.getNodeConfig(provider, connConfig)
+        # the node type (llm_openai, ...): the GenAI provider on its model-call spans
+        self._provider = str(provider or '')
 
         # A key still written as ${ROCKETRIDE_...} would go to the provider as the key,
         # and the user would see an "invalid API key" reply instead of the missing name.
@@ -291,6 +325,30 @@ class ChatBase:
             Exception: A mapped exception with a clearer message, or the original error
         """
         return error
+
+    def _model_call_done(self, call: _ModelCall, usage: Dict[str, Any], error: Optional[BaseException] = None) -> None:
+        """Tell the trace about this model call (a no-op when telemetry is off); never raises."""
+        try:
+            from ai.common.telemetry import relay
+
+            if not relay.active():
+                return  # telemetry off: nothing to build, and the SDK is never imported
+            from ai.common import logfmt
+            from ai.common.telemetry import _deps
+
+            relay.model_call(
+                'chat',
+                relay.genai_provider(self._provider),
+                self._model,
+                call.started,
+                time.time_ns(),
+                _error_kind(error) if error is not None else None,
+                _deps._clean_text(f'{type(error).__name__}: {error}', logfmt.redact) if error is not None else '',
+                call.retries,
+                usage,
+            )
+        except Exception:
+            pass
 
     def terminal_error(self, error: Exception) -> Optional[Exception]:
         """Return the error to raise at once for ``error``, or None to handle it as usual.
@@ -479,6 +537,8 @@ class ChatBase:
         base_delay = CONST_CHAT_BASE_DELAY
         max_delay = CONST_CHAT_MAX_DELAY
 
+        # The logical call this is part of (chat_string, chat_turn): its retries go on its span
+        model_call = _MODEL_CALL.get()
         for attempt in range(max_network_retries):
             try:
                 # Call the actual chat implementation provided by the subclass
@@ -497,12 +557,16 @@ class ChatBase:
                     # Surface the raw provider message in the UI Errors tab
                     # before map_exception() collapses it into a vaguer ValueError.
                     warning(f'Chat failed for model={self._model} ({type(e).__name__}): {e}')
+                    if model_call is not None:
+                        model_call.failure = e  # the provider's error, not the mapped one
 
                     # Map to a friendlier exception if possible
                     raise self.map_exception(e)
 
                 # Calculate exponential backoff delay
                 delay = min(base_delay * (2**attempt), max_delay)
+                if model_call is not None:
+                    model_call.retried(e, delay)
 
                 debug(
                     f'Network/API error on attempt {attempt + 1}/{max_network_retries}: {str(e)}. Retrying in {delay:.1f} seconds...'
@@ -580,6 +644,46 @@ class ChatBase:
             return ''
 
     def chat_string(
+        self,
+        prompt: str,
+        on_chunk: Optional[Callable[[str], None]] = None,
+        on_finish: Optional[Callable[[Optional[str]], None]] = None,
+        on_reasoning_chunk: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Run a string prompt with token checks and retry; when callbacks are given,
+        stream visible/reasoning deltas as they arrive. Returns the full answer.
+
+        One logical model call for the trace (a GenAI span holding its HTTP tries),
+        whichever path (streaming, native, non-streaming with retries) answers it.
+        """
+        from ai.common.llm_adapter import begin_call_usage, end_call_usage
+
+        call = _ModelCall()
+        finished = {'reason': None}
+
+        def on_finish_w(reason: Optional[str]) -> None:
+            finished['reason'] = reason
+            if on_finish is not None:
+                on_finish(reason)
+
+        call_token, usage_token = _MODEL_CALL.set(call), begin_call_usage()
+        error: Optional[BaseException] = None
+        try:
+            # Always the wrapper: a stream that breaks after its first chunk closes
+            # with on_finish('error'), and the call must not read as a success
+            return self._chat_string(prompt, on_chunk, on_finish_w, on_reasoning_chunk)
+        except Exception as e:
+            error = call.failure or e
+            raise
+        finally:
+            _MODEL_CALL.reset(call_token)
+            usage = end_call_usage(usage_token)
+            if error is None and finished['reason'] == 'error':
+                # a stream that broke after text reached the UI: closed with an error, not raised
+                error = call.failure or _StreamBroken('the stream ended with an error after output')
+            self._model_call_done(call, usage, error)
+
+    def _chat_string(
         self,
         prompt: str,
         on_chunk: Optional[Callable[[str], None]] = None,
@@ -672,6 +776,13 @@ class ChatBase:
             except Exception as e:
                 self._raise_if_terminal(e)
                 self._no_second_hosted_request(e)
+                call = _MODEL_CALL.get()
+                if call is not None:
+                    if emitted['any']:
+                        # No retry once text reached the UI: this error ends the call
+                        call.failure = e
+                    else:
+                        call.retried(e, 0.0)
                 warning(
                     f'Streaming disabled for model={self._model} '
                     f'({type(e).__name__}): {e}. Falling back to non-streaming response.'
@@ -722,11 +833,36 @@ class ChatBase:
 
         Streams when on_chunk is given, falling back to one invoke with retries if the stream
         fails before any text reached the caller. Reasoning goes to on_reasoning_chunk.
+
+        One logical model call for the trace, as in chat_string. A turn the engine refuses
+        before calling the model (InvalidTurn) is no model call.
         """
+        from ai.common.llm_adapter import begin_call_usage, end_call_usage
+
         try:
             question.checkTurn()
         except ValueError as e:
             raise InvalidTurn(str(e)) from e
+        call = _ModelCall()
+        call_token, usage_token = _MODEL_CALL.set(call), begin_call_usage()
+        error: Optional[BaseException] = None
+        try:
+            return self._chat_turn(question, on_chunk, on_finish, on_reasoning_chunk)
+        except Exception as e:
+            error = call.failure or e
+            raise
+        finally:
+            _MODEL_CALL.reset(call_token)
+            self._model_call_done(call, end_call_usage(usage_token), error)
+
+    def _chat_turn(
+        self,
+        question: Question,
+        on_chunk: Optional[Callable[[str], None]],
+        on_finish: Optional[Callable[[Optional[str]], None]],
+        on_reasoning_chunk: Optional[Callable[[str], None]],
+    ) -> Answer:
+        """chat_turn's model call, inside its span (the turn already checked)."""
         names = ToolNames.build(question.tools, question.messages)
         llm = self._turn_llm()
         origin = model_origin(llm)
@@ -753,6 +889,9 @@ class ChatBase:
                 if emitted:
                     raise
                 self._no_second_hosted_request(e)
+                model_call = _MODEL_CALL.get()
+                if model_call is not None:
+                    model_call.retried(e, 0.0)
                 warning(
                     f'Streaming disabled for model={self._model} '
                     f'({type(e).__name__}): {e}. Falling back to non-streaming response.'

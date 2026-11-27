@@ -55,6 +55,7 @@ from .engine import resolveSecureParameters
 from .engine import validatePipeline
 from .engine import warning
 from .error import APERR
+from .error import ConfigError
 from .error import Ec
 from .filters import IEndpointBase
 from .filters import IGlobalBase
@@ -95,6 +96,7 @@ from engLib import Filters
 __all__ = [
     'APERR',
     'args',
+    'ConfigError',
     'AVI_ACTION',
     'configureLogger',
     'debug',

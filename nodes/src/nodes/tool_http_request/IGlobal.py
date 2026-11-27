@@ -32,7 +32,7 @@ IInstance tool methods.
 from __future__ import annotations
 
 import re
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import IGlobalBase, OPEN_MODE, warning
 
 from ai.common.utils import config_int
@@ -80,16 +80,16 @@ def _check_wire_value(label: str, value: str) -> None:
     """Reject config values that must never be sent as-is."""
     unresolved = _UNRESOLVED_PLACEHOLDER.search(value)
     if unresolved:
-        raise ValueError(
+        raise ConfigError(
             f'{label} still contains the unresolved placeholder {unresolved.group(0)}; '
             'set that variable in the org, team, or user environment'
         )
     if '<REDACTED>' in value:
-        raise ValueError(
+        raise ConfigError(
             f'{label} references a variable outside the ROCKETRIDE_* namespace; only ${{ROCKETRIDE_*}} resolves'
         )
     if '\r' in value or '\n' in value:
-        raise ValueError(f'{label} must not contain line breaks')
+        raise ConfigError(f'{label} must not contain line breaks')
 
 
 def _pattern_pins_https_host(source: str) -> bool:
@@ -160,17 +160,17 @@ class IGlobal(IGlobalBase):
         """
         raw_type = cfg.get('authType')
         if raw_type is not None and not isinstance(raw_type, str):
-            raise ValueError(f'authType must be a string; got {type(raw_type).__name__}')
+            raise ConfigError(f'authType must be a string; got {type(raw_type).__name__}')
         auth_type = _config_text(cfg, 'authType').lower() or 'none'
         if auth_type not in _AUTH_FIELDS:
-            raise ValueError(f'authType must be one of {sorted(_AUTH_FIELDS)}; got {auth_type!r}')
+            raise ConfigError(f'authType must be one of {sorted(_AUTH_FIELDS)}; got {auth_type!r}')
         if auth_type == 'none':
             return None
 
         if auth_type == 'bearer':
             token = _config_text(cfg, 'authToken')
             if not token:
-                raise ValueError('authType is "bearer" but authToken is empty')
+                raise ConfigError('authType is "bearer" but authToken is empty')
             _check_wire_value('authToken', token)
             return {'type': 'bearer', 'bearer': {'token': token}}
 
@@ -178,7 +178,7 @@ class IGlobal(IGlobalBase):
             username = _config_text(cfg, 'authUsername')
             password = _config_text(cfg, 'authPassword')
             if not username:
-                raise ValueError('authType is "basic" but authUsername is empty')
+                raise ConfigError('authType is "basic" but authUsername is empty')
             _check_wire_value('authUsername', username)
             _check_wire_value('authPassword', password)
             return {'type': 'basic', 'basic': {'username': username, 'password': password}}
@@ -186,13 +186,13 @@ class IGlobal(IGlobalBase):
         name = _config_text(cfg, 'authHeaderName')
         value = _config_text(cfg, 'authHeaderValue')
         if not name:
-            raise ValueError('authType is "api_key" but authHeaderName is empty')
+            raise ConfigError('authType is "api_key" but authHeaderName is empty')
         if not _HEADER_NAME.match(name):
-            raise ValueError(f'authHeaderName {name!r} is not a valid HTTP header name')
+            raise ConfigError(f'authHeaderName {name!r} is not a valid HTTP header name')
         if name.lower() == 'host':
-            raise ValueError('authHeaderName cannot be Host; it is derived from the validated URL')
+            raise ConfigError('authHeaderName cannot be Host; it is derived from the validated URL')
         if not value:
-            raise ValueError('authType is "api_key" but authHeaderValue is empty')
+            raise ConfigError('authType is "api_key" but authHeaderValue is empty')
         _check_wire_value('authHeaderValue', value)
         return {'type': 'api_key', 'api_key': {'key': name, 'value': value, 'add_to': 'header'}}
 
@@ -208,36 +208,36 @@ class IGlobal(IGlobalBase):
             try:
                 raw_rows = json.loads(str(raw_rows))
                 if not isinstance(raw_rows, list):
-                    raise ValueError(f'defaultHeaders must be a JSON array, got {type(raw_rows).__name__}')
+                    raise ConfigError(f'defaultHeaders must be a JSON array, got {type(raw_rows).__name__}')
             except (json.JSONDecodeError, TypeError, ValueError) as e:
-                raise ValueError(f'defaultHeaders is malformed and cannot be parsed: {e}') from e
+                raise ConfigError(f'defaultHeaders is malformed and cannot be parsed: {e}') from e
 
         headers: dict[str, str] = {}
         seen: set[str] = set()
         for index, row in enumerate(raw_rows):
             if not hasattr(row, 'get'):
-                raise ValueError(f'defaultHeaders entry {index + 1} must be an object')
+                raise ConfigError(f'defaultHeaders entry {index + 1} must be an object')
             raw_name = row.get('headerName')
             raw_value = row.get('headerValue')
             if raw_name is not None and not isinstance(raw_name, str):
-                raise ValueError(f'defaultHeaders entry {index + 1} headerName must be a string')
+                raise ConfigError(f'defaultHeaders entry {index + 1} headerName must be a string')
             if raw_value is not None and not isinstance(raw_value, str):
-                raise ValueError(f'defaultHeaders entry {index + 1} headerValue must be a string')
+                raise ConfigError(f'defaultHeaders entry {index + 1} headerValue must be a string')
             name = (raw_name or '').strip()
             value = (raw_value or '').strip()
             if not name and not value:
                 continue
             if not name:
-                raise ValueError(f'defaultHeaders entry {index + 1} has a value but no header name')
+                raise ConfigError(f'defaultHeaders entry {index + 1} has a value but no header name')
             if not _HEADER_NAME.match(name):
-                raise ValueError(f'defaultHeaders entry {index + 1}: {name!r} is not a valid HTTP header name')
+                raise ConfigError(f'defaultHeaders entry {index + 1}: {name!r} is not a valid HTTP header name')
             if name.lower() in _RESERVED_DEFAULT_HEADERS:
-                raise ValueError(
+                raise ConfigError(
                     f'defaultHeaders entry {index + 1}: {name} cannot be a default header; '
                     'use the Authentication fields for credentials'
                 )
             if name.lower() in seen:
-                raise ValueError(f'defaultHeaders entry {index + 1}: {name} is listed more than once')
+                raise ConfigError(f'defaultHeaders entry {index + 1}: {name} is listed more than once')
             _check_wire_value(f'defaultHeaders entry {index + 1} ({name})', value)
             seen.add(name.lower())
             headers[name] = value
@@ -258,13 +258,13 @@ class IGlobal(IGlobalBase):
         if not reason:
             return
         if not patterns:
-            raise ValueError(
+            raise ConfigError(
                 f'{reason} but the URL whitelist is empty; add at least one '
                 '^https://<exact host> pattern so configured values only reach approved hosts'
             )
         for pattern in patterns:
             if not _pattern_pins_https_host(pattern.pattern):
-                raise ValueError(
+                raise ConfigError(
                     f'URL whitelist pattern {pattern.pattern!r} does not pin an exact https host; '
                     f'while {reason}, every pattern must start with https:// '
                     r'followed by a literal host with escaped dots, e.g. ^https://api\.github\.com/'
@@ -294,23 +294,23 @@ class IGlobal(IGlobalBase):
             try:
                 raw_whitelist = json.loads(str(raw_whitelist))
                 if not isinstance(raw_whitelist, list):
-                    raise ValueError(f'urlWhitelist must be a JSON array, got {type(raw_whitelist).__name__}')
+                    raise ConfigError(f'urlWhitelist must be a JSON array, got {type(raw_whitelist).__name__}')
             except (json.JSONDecodeError, TypeError, ValueError) as e:
-                raise ValueError(f'urlWhitelist is malformed and cannot be parsed: {e}') from e
+                raise ConfigError(f'urlWhitelist is malformed and cannot be parsed: {e}') from e
         patterns: list[re.Pattern] = []
         for index, row in enumerate(raw_whitelist):
             if not hasattr(row, 'get'):
-                raise ValueError(f'urlWhitelist entry {index + 1} must be an object')
+                raise ConfigError(f'urlWhitelist entry {index + 1} must be an object')
             raw_pattern = row.get('whitelistPattern')
             if not isinstance(raw_pattern, str):
-                raise ValueError(f'urlWhitelist entry {index + 1} whitelistPattern must be a string')
+                raise ConfigError(f'urlWhitelist entry {index + 1} whitelistPattern must be a string')
             pat_str = raw_pattern.strip()
             if not pat_str:
                 continue
             try:
                 patterns.append(re.compile(pat_str))
             except re.error as e:
-                raise ValueError(f'Invalid URL whitelist regex {pat_str!r}: {e}') from e
+                raise ConfigError(f'Invalid URL whitelist regex {pat_str!r}: {e}') from e
 
         return enabled, patterns
 

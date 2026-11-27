@@ -36,6 +36,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from ai.modules.task import error_log
 from rocketride import TASK_STATE
 
 from ai.constants import CONST_STATUS_HISTORY_LIMIT
@@ -1309,6 +1311,53 @@ async def test_start_passes_only_the_operators_options(monkeypatch, saas, startu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'server_args, relay',
+    [
+        (['--otel_pass_ids', '--otel_relay=db'], True),
+        ([], False),  # telemetry off: no relay, and the run's >SPN* lines are not read
+    ],
+)
+async def test_telemetry_options_are_the_servers_never_a_pipelines(monkeypatch, server_args, relay):
+    """A pipeline's --otel_* arguments are dropped, and the server's come before
+    the pipeline's own (the task reads the first --otel_relay). The run reads its
+    relayed telemetry only when the server started it with the relay.
+    """
+    import ai.modules.task.task_engine as engine
+
+    _fake_db_account(monkeypatch)
+    monkeypatch.setattr(engine, '_is_saas_engine', lambda: False)
+    monkeypatch.setattr(engine, 'startup_args', lambda: [])
+    monkeypatch.setattr(engine.telemetry, 'child_arguments', lambda: list(server_args))
+    t = _env_task(pipeline={'components': [{'id': 'src', 'provider': 'tools'}]})
+    t.source = 'src'
+    t._env_source = AsyncMock(return_value={})
+    t._restart_env = None
+    t._status = SimpleNamespace(name='', state=engine.TASK_STATE.NONE.value, exitMessage='', completed=False)
+    t._is_restarting = False
+    t._launch_args = {'args': ['--OTEL_RELAY=http,db', '--trace=debugOut --otel_pass_ids']}
+    t._server = MagicMock(_config={})
+    t._is_debugging = lambda: False
+    t._task_file_bytes = MagicMock(return_value=b'{}')
+    t._send_status_update = AsyncMock()
+    t._terminated = AsyncMock()
+    t._launcher = SubprocessLauncher(t._server)
+    monkeypatch.setattr(SubprocessLauncher, 'task_data_path', tempfile.gettempdir())
+
+    class Launched(Exception):
+        pass
+
+    spawn = AsyncMock(side_effect=Launched)
+    monkeypatch.setattr(engine.asyncio, 'create_subprocess_exec', spawn)
+    with pytest.raises(Launched):
+        await Task.start_task(t)
+
+    options = [a for a in spawn.call_args.args if a.lower().startswith(('--otel_', '--trace='))]
+    assert options == [*server_args, '--trace=debugOut']
+    assert t._otel_relay is relay
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('available', [True, False])
 async def test_start_puts_the_pipelines_nodes_on_disk_before_the_spawn(monkeypatch, available):
     """The nodes a pipeline names that the server lacks are unpacked before the
@@ -2475,6 +2524,8 @@ def _exit_task(exit_event_seen=False):
     t._stop_requested = False
     t._crash = None
     t._process_killed = False
+    t._exit_signal = None
+    t._oom_kills_at_start = None
     return t
 
 
@@ -2608,6 +2659,11 @@ def _ending_task(process_exit_code):
     t._send_status_update = AsyncMock()
     t._forward_task_event = AsyncMock()
     t._process_exit_code = AsyncMock(return_value=process_exit_code)
+    # what _terminated() reads for the run's telemetry and error log
+    t._reached_running = True
+    t._stop_interrupted = False
+    t._exit_error_code = None
+    t._error_log = error_log.Disabled()
     return t
 
 
@@ -2628,6 +2684,38 @@ async def test_a_reported_crash_ends_the_task(stop_requested, status, exit_code,
     await Task._terminated(t)
     assert (t._status.status, t._status.exitCode, t._status.exitMessage) == (status, exit_code, exit_message)
     assert run_log.end_run.await_args.args[0] == outcome
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_never_started_the_task_is_a_failed_start(monkeypatch):
+    """The launcher raised: no process, so the platform's start_failed, not start_error."""
+    import ai.modules.task.task_engine as engine
+
+    seen = []
+    monkeypatch.setattr(engine.telemetry, 'task_ended', lambda *args, **_kw: seen.append(args))
+    t = _ending_task(1)  # the status falls back to exit code 1 when there was no launch
+    t._reached_running = False
+    t._stop_requested = False
+    t._run_log = AsyncMock()
+    await Task._terminated(t)
+    ((_id, _identity, outcome, _reason, error_type, *_rest),) = seen
+    assert (outcome, error_type) == ('error', 'start_failed')
+
+
+@pytest.mark.asyncio
+async def test_a_failing_telemetry_call_never_breaks_teardown(monkeypatch):
+    """The run log still ends when the error log or telemetry raises."""
+    import ai.modules.task.task_engine as engine
+
+    def broken(*_args, **_kw):
+        raise RuntimeError('telemetry down')
+
+    monkeypatch.setattr(engine.telemetry, 'task_ended', broken)
+    t = _ending_task(1)
+    run_log = t._run_log = AsyncMock()
+    await Task._terminated(t)
+    run_log.end_run.assert_awaited_once()
+    assert run_log.end_run.await_args.args[0] == 'error'
 
 
 # ---------------------------------------------------------------------------
@@ -2844,3 +2932,20 @@ async def test_data_request_before_the_launch_fails_at_once(monkeypatch):
         await Task._send_data(t, {'command': 'apaext_process', 'arguments': {}})
 
     transport.assert_not_called()
+
+
+@pytest.mark.parametrize('relay', [False, True])
+async def test_relayed_dependency_records_are_taken_only_from_a_run_started_with_the_relay(monkeypatch, relay):
+    """A run's process started without --otel_relay has no relay: >SPN* lines from it are not telemetry."""
+    from ai.modules.task import task_engine
+
+    relayed = MagicMock(name='dependency_relayed')
+    monkeypatch.setattr(task_engine.telemetry, 'dependency_relayed', relayed)
+    t = _task()
+    t._error_log = MagicMock()
+    t._otel_relay = relay
+    body = {'calls': [{'m': 'db.client.operation.duration', 's': 1, 'e': 2}]}
+
+    await Task.on_event(t, {'event': 'apaevt_dependency', 'body': body})
+
+    assert relayed.call_count == (1 if relay else 0)

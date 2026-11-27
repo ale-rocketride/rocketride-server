@@ -576,3 +576,50 @@ class TestDepends:
         monkeypatch.setattr(depends, 'ensure_constraints', lambda: pytest.fail('constraints must not run'))
 
         depends.depends(str(tmp_path / 'does-not-exist.txt'))
+
+
+class TestAfterInstallHooks:
+    @pytest.fixture
+    def quiet_install(self, exe_dir, monkeypatch):
+        """depends() with the install steps stubbed: what it would install is recorded."""
+        (exe_dir / 'cache').mkdir()
+        installed = []
+        monkeypatch.setattr(depends, 'bootstrap', lambda: None)
+        monkeypatch.setattr(depends, 'ensure_constraints', lambda: 'constraints.txt')
+        monkeypatch.setattr(depends, '_apply_pywin32_hack', lambda: None)
+        monkeypatch.setattr(depends, '_install_requirements', lambda path, constraints: installed.append(path))
+        monkeypatch.setattr(depends, '_processed', set())
+        monkeypatch.setattr(depends, 'after_install_hooks', [])
+        return installed
+
+    def test_hooks_run_after_the_install_with_its_path(self, exe_dir, quiet_install):
+        requirements = _write(exe_dir / 'nodes' / 'a' / 'requirements.txt')
+        seen = []
+        depends.after_install_hooks.append(lambda path: seen.append((path, list(quiet_install))))
+
+        depends.depends(str(requirements))
+
+        assert seen == [(str(requirements), [str(requirements)])]  # after the install
+
+    def test_load_depends_runs_the_hooks(self, exe_dir, quiet_install):
+        requirements = _write(exe_dir / 'nodes' / 'a' / 'requirements.txt')
+        seen = []
+        depends.after_install_hooks.append(seen.append)
+
+        depends.load_depends(str(exe_dir / 'nodes' / 'a' / '__init__.py'))
+
+        assert seen == [os.path.realpath(requirements)]
+
+    def test_a_raising_hook_never_breaks_depends(self, exe_dir, quiet_install):
+        requirements = _write(exe_dir / 'nodes' / 'a' / 'requirements.txt')
+        seen = []
+
+        def broken(path):
+            raise RuntimeError('hook failed')
+
+        depends.after_install_hooks.extend([broken, seen.append])
+
+        depends.depends(str(requirements))  # does not raise
+
+        assert quiet_install == [str(requirements)]
+        assert seen == [str(requirements)]  # the next hook still runs

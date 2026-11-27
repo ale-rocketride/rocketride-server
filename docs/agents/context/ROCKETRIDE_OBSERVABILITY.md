@@ -10,8 +10,11 @@ is not listed here, it likely does not exist in the server.
 
 ## 1. What RocketRide ships for observability
 
-RocketRide does **not** expose OpenTelemetry, Jaeger, Prometheus `/metrics`,
-Sentry, webhook registration, audit-log tables, or a queryable history database.
+RocketRide does **not** expose Jaeger, Prometheus `/metrics`, Sentry, webhook
+registration, audit-log tables, or a queryable history database. The server can
+export OpenTelemetry metrics and traces over OTLP when an operator turns it on
+(`RR_OTEL_ENABLED`, off by default; see docs/public/product/operate/self-hosting/telemetry.md) —
+that is an operator setting, not something a pipeline or an agent can use.
 There is no SQL store of past runs to read from — but the server does record
 run streams you can list and replay (see §8).
 

@@ -48,6 +48,7 @@ connection until you call `attach()`, `login()`, or
 | `onTrace` | `(type: TraceType, message: DAPMessage) => void` | Called around high-level SDK requests with a credential-redacted message copy — for logging or telemetry. |
 | `onProtocolMessage` | `(message: string) => void` | Credential-redacted DAP messages, for protocol debugging. |
 | `onDebugMessage` | `(message: string) => void` | Debug output. |
+| `traceparent` | `() => string \| undefined` | Returns the caller's W3C trace context for each request, so the server records the request in your trace when its telemetry is on (it is off by default). With OpenTelemetry: inject `context.active()` with `propagation` and return `carrier.traceparent`. See [Telemetry](/operate/self-hosting/telemetry#tracing-from-your-application). |
 
 ```typescript
 const client = new RocketRideClient({

@@ -118,6 +118,7 @@ const SPINE = [
 					{ id: 'operate/self-hosting/docker', label: 'Docker' },
 					{ id: 'operate/self-hosting/kubernetes', label: 'Kubernetes' },
 					{ id: 'operate/self-hosting/production', label: 'Production' },
+					{ id: 'operate/self-hosting/telemetry', label: 'Telemetry (OpenTelemetry)' },
 				],
 			},
 			{ id: 'operate/security', label: 'Security' },

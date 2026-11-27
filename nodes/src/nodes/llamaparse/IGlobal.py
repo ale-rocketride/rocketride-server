@@ -24,7 +24,7 @@
 import os
 import threading
 from typing import TYPE_CHECKING
-from rocketlib import IGlobalBase, debug, warning
+from rocketlib import IGlobalBase, debug, warning, error
 from ai.common.config import Config
 
 if TYPE_CHECKING:
@@ -215,7 +215,7 @@ class IGlobal(IGlobalBase):
             self._llama_parse = LlamaParse(**parser_args)
             debug('LlamaParse Global: LlamaParse instance created successfully')
         except Exception as e:
-            warning(f'LlamaParse Global: Error creating LlamaParse instance: {str(e)}')
+            error(f'LlamaParse Global: Error creating LlamaParse instance: {str(e)}')
             self._llama_parse = None
 
         # Store the LlamaParse instance in the bag for the parser to use

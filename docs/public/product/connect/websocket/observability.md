@@ -8,8 +8,10 @@ RocketRide exposes runtime observability (task lifecycle, periodic status,
 resource metrics, and per-component flow traces) as a **live event stream over
 the same [WebSocket](/connect/websocket) the engine already speaks**. You open a
 socket, subscribe to the event types you care about, and the engine pushes events
-as a run unfolds. There is no external metrics endpoint to scrape: it is **not**
-OpenTelemetry, Prometheus, Sentry, or webhooks. The engine does keep a persistent
+as a run unfolds. There is no external metrics endpoint to scrape: this stream is
+**not** Prometheus, Sentry, or webhooks. (Separately, the server can export
+metrics and traces with OpenTelemetry, off by default: see
+[Telemetry](/operate/self-hosting/telemetry).) The engine does keep a persistent
 run-log continuum queryable over this same socket (the `rrext_log` command and its
 subcommands; SDK `LogApi`); you can also connect, subscribe, and persist the
 events yourself as they arrive.

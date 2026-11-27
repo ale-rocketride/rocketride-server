@@ -27,7 +27,7 @@ XAI binding for the ChatLLM.
 
 from typing import Any, Dict
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from langchain_xai import ChatXAI
 
 
@@ -53,7 +53,7 @@ class Chat(ChatBase):
 
         # API key validation logic
         if not apikey or not apikey.startswith('xai-'):
-            raise ValueError('Invalid XAI API key format, please check your API key.')
+            raise ConfigError('Invalid XAI API key format, please check your API key.')
 
         # Init the chat base
         super().__init__(provider, connConfig, bag)

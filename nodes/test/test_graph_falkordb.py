@@ -114,6 +114,7 @@ def _install_stubs() -> None:
 
     config = types.ModuleType('ai.common.config')
     config.Config = types.SimpleNamespace(getNodeConfig=lambda *a, **kw: {})
+    config.ConfigError = type('ConfigError', (ValueError,), {})
 
     # Load the real config parsers rather than reimplementing them, so the node
     # is exercised against the same coercion rules it uses in production.

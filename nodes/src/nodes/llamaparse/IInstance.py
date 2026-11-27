@@ -24,7 +24,7 @@
 import base64
 import json
 from typing import List, Optional
-from rocketlib import IInstanceBase, Entry, debug
+from rocketlib import IInstanceBase, Entry, debug, error, warning
 from ai.common.schema import Doc
 from .IGlobal import IGlobal
 from .scale import extract_markdown_tables
@@ -48,6 +48,7 @@ class IInstance(IInstanceBase):
         self._current_text = ''
         self._document_data = b''  # Reset document data when a new object is opened
         self._target_object_writer = None
+        self._failures_logged = set()  # the first tag failure of this object is an ERROR
         debug(
             f'LlamaParse Instance: Object opened, size: {object.size if hasattr(object, "size") else "unknown"} bytes'
         )
@@ -249,7 +250,7 @@ class IInstance(IInstanceBase):
                     self._document_data = b''  # clear buffer
                     debug('LlamaParse Instance: Completed processing tag stream')
                 except Exception as e:
-                    debug(f'LlamaParse Instance: Error processing document data: {e}')
+                    error(f'LlamaParse Instance: Error processing document data: {e}')
 
             # Object begin/end tags - just log them
             elif tag_id_str.endswith('OBEG'):
@@ -265,9 +266,18 @@ class IInstance(IInstanceBase):
                 debug(f'LlamaParse Instance: Unknown tag type: {tag_id_str}')
 
         except Exception as e:
-            debug(
-                f'LlamaParse Instance: Error processing tag {getattr(tag, "tagId", "unknown")}: {type(e).__name__}: {e}'
+            self._log_failure(
+                'tag',
+                f'LlamaParse Instance: Error processing tag {getattr(tag, "tagId", "unknown")}: {type(e).__name__}: {e}',
             )
+
+    def _log_failure(self, kind: str, message: str) -> None:
+        """Log the first failure of a kind per object at ERROR and the later ones at WARNING."""
+        logged = getattr(self, '_failures_logged', None)
+        if logged is None:
+            logged = self._failures_logged = set()
+        (warning if kind in logged else error)(message)
+        logged.add(kind)
 
     def _process_document(self, document_data: bytes, mime_type: str):
         """Process document data using LlamaParse."""
@@ -359,7 +369,7 @@ class IInstance(IInstanceBase):
                 debug('LlamaParse Instance: Sent document to documents lane')
 
         except Exception as e:
-            debug(f'LlamaParse Instance: LlamaParse processing failed: {type(e).__name__}: {e}')
+            error(f'LlamaParse Instance: LlamaParse processing failed: {type(e).__name__}: {e}')
             import traceback
 
             debug(f'LlamaParse Instance: Full traceback: {traceback.format_exc()}')

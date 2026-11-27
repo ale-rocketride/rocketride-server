@@ -40,8 +40,9 @@ import os
 import tempfile
 from typing import Any, Dict
 
-from rocketlib import warning
+from rocketlib import getVersion, warning
 
+from ai.common import telemetry
 from ai.constants import CONST_TASK_DATA_PATH
 from ai.modules.task.launcher import RUNTIMES
 from ai.proc_privacy import make_process_private, should_make_private
@@ -80,6 +81,14 @@ def _require_writable_task_data(path: str = CONST_TASK_DATA_PATH) -> None:
             f'A volume created by an older image is owned by its old user. Fix it once with:\n'
             f'  docker run --rm -v <volume>:{path} alpine chown -R {uid}:{gid} {path}'
         )
+
+
+def _engine_version() -> str:
+    """The engine version (as /version reports it), or '' when unavailable."""
+    try:
+        return str((getVersion() or {}).get('version') or '')
+    except Exception:
+        return ''
 
 
 def _normalize_modelserver(address: str) -> str:
@@ -222,6 +231,10 @@ async def run(config: Dict[str, Any] = None) -> None:
     # there), and before serving, so before any task exists.
     _make_engine_private()
 
+    # OpenTelemetry, after the .env for the same reason (RR_OTEL_*, OTEL_*). Off
+    # unless RR_OTEL_ENABLED is set; never fatal, never blocks startup.
+    telemetry.init(_engine_version())
+
     # Add our modules
     server.use('services')
     server.use('chat')
@@ -255,7 +268,11 @@ async def run(config: Dict[str, Any] = None) -> None:
     await register_public_pages(server)
 
     # Start the FastAPI server loop
-    await server.serve()
+    try:
+        await server.serve()
+    finally:
+        # Bounded: an unreachable collector cannot hold up the exit
+        telemetry.shutdown()
 
 
 def main():

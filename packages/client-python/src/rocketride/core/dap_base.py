@@ -56,6 +56,36 @@ import traceback
 import logging
 from typing import Dict, Any, Optional, Union
 
+# W3C trace context propagation. opentelemetry-api is optional: when the caller
+# has it and a span is active, every request carries its traceparent and the
+# server records the request as a child span. ROCKETRIDE_TRACE_PROPAGATION=false
+# turns it off.
+_otel_trace: Any = None
+
+
+def current_traceparent() -> Optional[str]:
+    """The active span's W3C traceparent, or None (no OpenTelemetry, no span, or off). Never raises."""
+    global _otel_trace
+    if _otel_trace is False:
+        return None
+    try:
+        if _otel_trace is None:
+            if os.environ.get('ROCKETRIDE_TRACE_PROPAGATION', '').strip().lower() in ('0', 'false', 'no', 'off'):
+                _otel_trace = False
+                return None
+            from opentelemetry import trace as otel_trace
+
+            _otel_trace = otel_trace
+        context = _otel_trace.get_current_span().get_span_context()
+        if not context.is_valid:
+            return None
+        return f'00-{context.trace_id:032x}-{context.span_id:016x}-{int(context.trace_flags):02x}'
+    except ImportError:
+        _otel_trace = False
+        return None
+    except Exception:
+        return None
+
 
 class DAPBase:
     """
@@ -547,6 +577,11 @@ class DAPBase:
             'seq': self._next_seq(),  # Unique sequence for correlation
             'command': command,  # The DAP command to execute
         }
+
+        # Distributed tracing: the caller's active span, when it uses OpenTelemetry
+        traceparent = current_traceparent()
+        if traceparent:
+            request['traceparent'] = traceparent
 
         # Include token for task correlation (inside arguments)
         if token is not None:

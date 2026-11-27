@@ -25,7 +25,7 @@
 
 from __future__ import annotations
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from rocketlib import IGlobalBase, OPEN_MODE, debug, warning
 
 try:
@@ -62,7 +62,7 @@ class IGlobal(IGlobalBase):
         self.deployed_index_id = str((cfg.get('deployedIndexId') or '')).strip()
 
         if not index_endpoint_id or not self.deployed_index_id:
-            raise ValueError('indexEndpointId and deployedIndexId are required for Vertex AI Vector Search.')
+            raise ConfigError('indexEndpointId and deployedIndexId are required for Vertex AI Vector Search.')
 
         # Auth
         try:

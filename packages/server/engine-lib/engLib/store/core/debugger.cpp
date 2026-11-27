@@ -26,6 +26,11 @@
 namespace engine::store {
 namespace py = pybind11;
 
+// Pass trace ids for EaaS's telemetry: EaaS passes --otel_pass_ids to a run's
+// process only while telemetry is on. Without it the debugger is as before
+// (no id, no lock, the events unchanged).
+static application::Opt OtelPassIds{"--otel_pass_ids"};
+
 // Static member definitions
 std::mutex Debugger::s_registryMutex;
 std::unordered_map<std::string, ServiceEndpointWeak>
@@ -49,14 +54,21 @@ std::unordered_map<std::string, ServiceEndpointWeak>
  */
 void Debugger::debugEnter(IServiceFilterInstance *pInstance,
                           const json::Value &trace) noexcept {
-    m_recurseLevel++;  // Track depth of recursive calls
+    const bool monitored = ::engine::config::monitor()->isAppMonitor();
 
-    if (::engine::config::monitor()->isAppMonitor()) {
-        // Format it
+    // With pass ids on, the outermost enter begins a pass with a trace id of
+    // its own; nested ones keep it. The option and the monitor are fixed for
+    // the process, so an enter and its leave (or debugUnwind) always take the
+    // same branch.
+    const std::string traceId =
+        OtelPassIds && monitored ? m_passIds.begin() : std::string{};
+
+    if (monitored) {
+        // Format it, with the pass's trace id ("tid") when there is one
         StackText msg;
         _tsbo(msg, {Format::HEX, {}, '*'}, "ENTER", pInstance->pipeId,
-              pInstance->endpoint->getPipeCount(),
-              pInstance->pipeType.id, trace.stringify());
+              pInstance->endpoint->getPipeCount(), pInstance->pipeType.id,
+              withPassTraceId(trace.stringify(), traceId));
 
         ::engine::config::monitor()->other("DBG", msg);
     }
@@ -71,17 +83,33 @@ void Debugger::debugEnter(IServiceFilterInstance *pInstance,
  */
 void Debugger::debugLeave(IServiceFilterInstance *pInstance,
                           const json::Value &trace) noexcept {
-    m_recurseLevel--;
+    const bool monitored = ::engine::config::monitor()->isAppMonitor();
 
-    if (::engine::config::monitor()->isAppMonitor()) {
-        // Format it
+    // The leave carries its pass's id; the outermost one ends the pass
+    const std::string traceId =
+        OtelPassIds && monitored ? m_passIds.end() : std::string{};
+
+    if (monitored) {
+        // Format it, with the pass's trace id ("tid") when there is one
         StackText msg;
         _tsbo(msg, {Format::HEX, {}, '*'}, "LEAVE", pInstance->pipeId,
-              pInstance->endpoint->getPipeCount(),
-              pInstance->pipeType.id, trace.stringify());
+              pInstance->endpoint->getPipeCount(), pInstance->pipeType.id,
+              withPassTraceId(trace.stringify(), traceId));
 
         ::engine::config::monitor()->other("DBG", msg);
     }
+}
+
+/**
+ * @brief Ends the level a debugEnter began whose debugLeave will not come
+ * (an exception unwound the call between them; see Level).
+ *
+ * No event, as before; but the pass ends when its outermost level does, so
+ * the next pass gets a trace id of its own instead of keeping this one.
+ */
+void Debugger::debugUnwind() noexcept {
+    if (!OtelPassIds || !::engine::config::monitor()->isAppMonitor()) return;
+    m_passIds.unwind();
 }
 
 /**
@@ -118,6 +146,11 @@ void Debugger::debugError(IServiceFilterInstance *pFrom,
                           Error &ccode) noexcept {
     LOG(DebugOut, ">DBG*ERROR*....");
     // Could log ccode and methodName for more detail if needed.
+}
+
+/// The current pass's trace id (see debugger.hpp)
+std::string Debugger::passTraceId() const noexcept {
+    return m_passIds.current();
 }
 
 // ------------------ Task Control Methods ------------------

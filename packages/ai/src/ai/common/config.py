@@ -5,7 +5,7 @@ import sys
 import os
 import difflib
 from typing import Dict, Any, Optional
-from rocketlib import getServiceDefinition, IJson, warning
+from rocketlib import ConfigError, getServiceDefinition, IJson, warning
 
 # Token limits. Several pipeline shapes can hold them (see getNodeConfig), and a
 # value written in two places with two values is worth a warning.
@@ -18,8 +18,11 @@ _UNRESOLVED_PLACEHOLDER = re.compile(r'\$\{([^}]*)\}')
 _REDACTED_PLACEHOLDER = '<REDACTED>'
 
 
-class UnresolvedCredentialError(ValueError):
-    """A credential still holds a ``${...}`` or ``<REDACTED>`` placeholder that no variable filled."""
+class UnresolvedCredentialError(ConfigError):
+    """A credential still holds a ``${...}`` or ``<REDACTED>`` placeholder that no variable filled.
+
+    A ConfigError (a ValueError): a run that stops on it is a refused pipeline.
+    """
 
 
 def check_credential_resolved(logicalType: str, field: str, value: Any, connConfig: Any = None) -> None:
@@ -407,9 +410,10 @@ class Config:
             defaultConfig = profileConfig
 
         else:
-            # Make sure it is a valid profile
+            # Make sure it is a valid profile: the pipeline's choice (a ValueError:
+            # its configuration); a missing default above is the service's own
             if profile not in preconfig['profiles']:
-                raise Exception(f'Profile {profile} is not defined in {logicalType}')
+                raise ValueError(f'Profile {profile} is not defined in {logicalType}')
 
             # Get the profile config
             profileConfig = preconfig['profiles'][profile]

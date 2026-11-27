@@ -40,6 +40,7 @@ from redis.exceptions import RedisError
 
 from rocketlib import OPEN_MODE, debug, warning
 
+from ai.common.config import ConfigError
 from ai.common.graph import GraphGlobalBase
 from ai.common.utils import config_int, parse_bool
 
@@ -408,10 +409,10 @@ def _connection_url(config: Dict[str, Any]) -> str:
     url = str(config.get('url') or '').strip()
     if not url:
         if str(config.get('mode') or '').strip().lower() == 'url':
-            raise ValueError('FalkorDB URL is required, e.g. falkor://user:password@host:6379')
+            raise ConfigError('FalkorDB URL is required, e.g. falkor://user:password@host:6379')
         return ''
     if not url.startswith(URL_SCHEMES):
-        raise ValueError(
+        raise ConfigError(
             f'Unsupported FalkorDB URL scheme in "{_redact(url)}": expected one of {", ".join(URL_SCHEMES)}'
         )
     return url

@@ -92,6 +92,9 @@ export interface DAPMessage {
 
 	/** Stack trace information for errors */
 	trace?: TraceInfo;
+
+	/** W3C trace context of the caller's active span (requests only; see RocketRideClientConfig.traceparent) */
+	traceparent?: string;
 }
 
 /**
@@ -242,6 +245,20 @@ export interface RocketRideClientConfig {
 	 * @param payload   - The trace data: command, args, and (for success/error) the result or error message.
 	 */
 	onTrace?: (traceType: TraceType, message: DAPMessage) => void;
+
+	/**
+	 * Optional W3C trace context for distributed tracing. Called for every
+	 * request; return the active `traceparent` (or undefined) and the server
+	 * records the request as a child span of your trace. No dependency is
+	 * added: with OpenTelemetry, for example
+	 *
+	 *   traceparent: () => {
+	 *     const carrier: Record<string, string> = {};
+	 *     propagation.inject(context.active(), carrier);
+	 *     return carrier.traceparent;
+	 *   }
+	 */
+	traceparent?: () => string | undefined;
 }
 
 // =============================================================================

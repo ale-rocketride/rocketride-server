@@ -27,7 +27,7 @@ Zhipu AI GLM binding for the ChatLLM.
 
 from typing import Any, Dict
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from langchain_openai import ChatOpenAI
 
 
@@ -70,7 +70,7 @@ class Chat(ChatBase):
         if isinstance(apikey, str):
             apikey = apikey.strip()
         if ('api.z.ai' in serverbase or 'bigmodel.cn' in serverbase) and not apikey:
-            raise ValueError('GLM API key is required for cloud profiles.')
+            raise ConfigError('GLM API key is required for cloud profiles.')
 
         # Self-hosted / custom OpenAI-compatible endpoints accept any token,
         # so fall back to a dummy key. Mirrors the llm_minimax pattern.

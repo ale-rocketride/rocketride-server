@@ -26,7 +26,7 @@
 # ------------------------------------------------------------------------------
 import os
 from rocketlib import IGlobalBase, OPEN_MODE, warning
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 
 from .chunker_strategies import ChunkingStrategy, SentenceChunker, TokenChunker
 
@@ -70,11 +70,11 @@ class IGlobal(IGlobalBase):
             encoding_name = config.get('encoding_name', 'cl100k_base')
 
             if chunk_size <= 0:
-                raise ValueError(f'chunk_size must be positive, got {chunk_size}')
+                raise ConfigError(f'chunk_size must be positive, got {chunk_size}')
             if chunk_overlap < 0:
-                raise ValueError(f'chunk_overlap must be non-negative, got {chunk_overlap}')
+                raise ConfigError(f'chunk_overlap must be non-negative, got {chunk_overlap}')
             if chunk_overlap >= chunk_size:
-                raise ValueError(f'chunk_overlap ({chunk_overlap}) must be less than chunk_size ({chunk_size})')
+                raise ConfigError(f'chunk_overlap ({chunk_overlap}) must be less than chunk_size ({chunk_size})')
 
             # Build the appropriate strategy
             if strategy_name == 'token':
@@ -94,12 +94,12 @@ class IGlobal(IGlobalBase):
                 # RecursiveCharacterTextSplitter. Name it explicitly so a stale
                 # config gets a pointer instead of a bare "unknown strategy".
                 if strategy_name == 'recursive':
-                    raise ValueError(
+                    raise ConfigError(
                         "Chunker strategy 'recursive' was removed: use the preprocessor_langchain "
                         "node (its 'default' or 'recursive' profile) for recursive character "
                         'splitting. This node provides: sentence, token.'
                     )
-                raise ValueError(f"Unknown chunker strategy '{strategy_name}'. Expected one of: sentence, token.")
+                raise ConfigError(f"Unknown chunker strategy '{strategy_name}'. Expected one of: sentence, token.")
 
     def endGlobal(self):
         """Release the configured chunking strategy."""

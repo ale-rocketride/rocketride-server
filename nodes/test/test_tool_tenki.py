@@ -92,7 +92,9 @@ def _stubs() -> dict:
         setattr(tenki, name, type(name, (_SandboxError,), {}))
     tenki.ResumeWaitTimeoutError = type('ResumeWaitTimeoutError', (_SandboxError, TimeoutError), {})
     names = ('depends', 'ai', 'ai.common', 'ai.common.config')
-    return {'rocketlib': rocketlib, 'luxor_ai': tenki, **{name: MagicMock() for name in names}}
+    stubs = {'rocketlib': rocketlib, 'luxor_ai': tenki, **{name: MagicMock() for name in names}}
+    stubs['ai.common.config'].ConfigError = type('ConfigError', (ValueError,), {})
+    return stubs
 
 
 def _load(name, path):

@@ -23,7 +23,7 @@
 # =============================================================================
 
 from rocketlib import IGlobalBase, OPEN_MODE, warning
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 
 
 class IGlobal(IGlobalBase):
@@ -64,7 +64,7 @@ class IGlobal(IGlobalBase):
 
         classes = [c.strip() for c in prompt.replace('.', ',').split(',') if c.strip()]
         if backend in OPEN_VOCAB_BACKENDS and not classes:
-            raise ValueError(
+            raise ConfigError(
                 f'detect: engine "{backend}" requires a non-empty prompt (detect.prompt). '
                 'Set a prompt in the UI (e.g. "person . car . dog") and restart the pipeline.'
             )

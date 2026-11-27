@@ -57,6 +57,7 @@
 #include "./headers/memory.hpp"
 #include "./headers/binder.hpp"
 #include "./core/stream_descriptor.hpp"
+#include "./headers/passIds.hpp"
 #include "./headers/debugger.hpp"
 #include "./headers/endpoint.hpp"
 #include "./headers/filter.hpp"

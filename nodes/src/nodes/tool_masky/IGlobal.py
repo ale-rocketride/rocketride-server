@@ -36,7 +36,7 @@ import math
 import urllib.parse
 from typing import Any, Dict, List
 
-from ai.common.config import Config, check_credential_resolved
+from ai.common.config import Config, ConfigError, check_credential_resolved
 from ai.common.utils import parse_bool
 from rocketlib import IGlobalBase, OPEN_MODE, warning
 
@@ -64,7 +64,7 @@ def validate_base_url(raw: str) -> str:
         return url
     if scheme == 'http' and host in LOCAL_HOSTS:
         return url
-    raise ValueError(
+    raise ConfigError(
         'baseUrl must start with https:// (plain http is allowed only for localhost, 127.0.0.1 or ::1), '
         'so the API key is never sent unencrypted.'
     )
@@ -73,7 +73,7 @@ def validate_base_url(raw: str) -> str:
 def _choice(cfg: Dict[str, Any], name: str, default: str, allowed: tuple) -> str:
     value = str(cfg.get(name) or default).strip()
     if value not in allowed:
-        raise ValueError(f'{name} must be one of {", ".join(allowed)} (got {value!r})')
+        raise ConfigError(f'{name} must be one of {", ".join(allowed)} (got {value!r})')
     return value
 
 
@@ -83,13 +83,13 @@ def _int(cfg: Dict[str, Any], name: str, default: int, minimum: int, maximum: in
         return default
     bound = f'between {minimum} and {maximum}' if maximum is not None else f'>= {minimum}'
     if isinstance(raw, bool):
-        raise ValueError(f'{name} must be an integer {bound}')
+        raise ConfigError(f'{name} must be an integer {bound}')
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        raise ValueError(f'{name} must be an integer {bound}') from None
+        raise ConfigError(f'{name} must be an integer {bound}') from None
     if value < minimum or (maximum is not None and value > maximum):
-        raise ValueError(f'{name} must be an integer {bound}')
+        raise ConfigError(f'{name} must be an integer {bound}')
     return value
 
 
@@ -99,13 +99,13 @@ def read_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     try:
         max_credits = float(1.0 if raw_credits in (None, '') else raw_credits)
     except (TypeError, ValueError):
-        raise ValueError('maxCreditsPerCall must be a number >= 0') from None
+        raise ConfigError('maxCreditsPerCall must be a number >= 0') from None
     if isinstance(raw_credits, bool) or not math.isfinite(max_credits) or max_credits < 0:
-        raise ValueError('maxCreditsPerCall must be a finite number >= 0')
+        raise ConfigError('maxCreditsPerCall must be a finite number >= 0')
 
     fps = _int(cfg, 'fps', 24, 1)
     if fps not in (24, 48):
-        raise ValueError('fps must be 24 or 48')
+        raise ConfigError('fps must be 24 or 48')
 
     seed_raw = cfg.get('seed')
     seed = None if seed_raw in (None, '') else _int(cfg, 'seed', 0, 0)
@@ -196,7 +196,7 @@ class IGlobal(IGlobalBase):
             warning(
                 f'Masky API key is required. Set it on the node or in {ENV_API_KEY}. Get one at https://masky.ai/developer'
             )
-            raise ValueError('Masky API key not configured')
+            raise ConfigError('Masky API key not configured')
         # A ${ROCKETRIDE_...} placeholder with no saved value must not reach Masky as the key.
         check_credential_resolved(self.glb.logicalType, 'apikey', api_key, self.glb.connConfig)
 

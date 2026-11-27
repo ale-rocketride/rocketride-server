@@ -49,6 +49,7 @@ def _load_node_modules(monkeypatch: pytest.MonkeyPatch):
 
     config_module = types.ModuleType('ai.common.config')
     config_module.Config = Mock()
+    config_module.ConfigError = type('ConfigError', (ValueError,), {})
     utils_module = types.ModuleType('ai.common.utils')
     utils_module.config_int = Mock()
     url_policy = _load_shared_util('url_policy')

@@ -34,7 +34,7 @@ import time
 import urllib.parse
 import uuid
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from ai.common.utils import config_int
 from rocketlib import IGlobalBase, OPEN_MODE, debug, warning
 
@@ -126,13 +126,13 @@ def _names(raw, field: str) -> list[str]:
     if isinstance(raw, str):
         raw = raw.split(',')
     if not isinstance(raw, (list, tuple)):
-        raise ValueError(
+        raise ConfigError(
             f'tenki.{field} must be a list of names, or one comma-separated string, not a {type(raw).__name__}'
         )
     names = []
     for position, entry in enumerate(raw, 1):
         if not isinstance(entry, str):
-            raise ValueError(f'tenki.{field}: entry {position} is a {type(entry).__name__}, not text')
+            raise ConfigError(f'tenki.{field}: entry {position} is a {type(entry).__name__}, not text')
         name = entry.strip()
         if name and name not in names:
             names.append(name)
@@ -197,9 +197,9 @@ def _allowed_domains(raw) -> list[str]:
         )
         lists.append(f'{label}: {", ".join(addresses)}')
     if rules:
-        raise ValueError(f'{" ".join(rules)} {"; ".join(lists)}')
+        raise ConfigError(f'{" ".join(rules)} {"; ".join(lists)}')
     if len(domains) > _MAX_DOMAINS:
-        raise ValueError(f'tenki.allow_domains lists {len(domains)} hosts, and Luxor accepts up to {_MAX_DOMAINS}')
+        raise ConfigError(f'tenki.allow_domains lists {len(domains)} hosts, and Luxor accepts up to {_MAX_DOMAINS}')
     return domains
 
 
@@ -208,7 +208,7 @@ def _secret_settings(cfg) -> tuple[tuple[str, ...], tuple[str, ...]]:
     policies = tuple(_names(cfg.get('secret_policies'), 'secret_policies'))
     domains = tuple(_allowed_domains(cfg.get('allow_domains')))
     if policies and not domains:
-        raise ValueError(
+        raise ConfigError(
             'tenki.secret_policies is set but tenki.allow_domains is empty. With no allowlist a sandbox can '
             'reach any host on any port, and one that can use a secret must not: list the hosts it needs in '
             'tenki.allow_domains (github.com, for example).'
@@ -263,13 +263,13 @@ def _git_auth_url(raw: str) -> str:
         or '.' in segments
         or '..' in segments
     ):
-        raise ValueError(
+        raise ConfigError(
             'tenki.git_auth_url must be an https URL with a host and, optionally, a path, such as '
             'https://github.com/acme/, with no credentials, port, query or fragment (the value is not shown: '
             'it may hold a credential)'
         )
     if _is_ip_address(host):
-        raise ValueError(
+        raise ConfigError(
             f"tenki.git_auth_url is on {host}, an IP address, which tenki.allow_domains cannot list: the sandbox's "
             "egress filter matches hostnames only, so use the git server's hostname"
         )
@@ -282,22 +282,22 @@ def _git_auth_settings(cfg, policies: tuple[str, ...], domains: tuple[str, ...])
     if secret is None or (isinstance(secret, str) and not secret.strip()):
         return '', ''
     if isinstance(secret, str) and _looks_like_a_credential(secret.strip()):
-        raise ValueError(
+        raise ConfigError(
             'tenki.git_auth_secret looks like a credential value (it begins the way issued tokens do), not the name '
             'of a Luxor secret. The node never holds a secret value: create the secret in Luxor '
             'and put its name here. If this is the name of a secret, rename the secret.'
         )
     if not isinstance(secret, str) or not _SECRET_NAME.fullmatch(secret.strip()):
-        raise ValueError(
+        raise ConfigError(
             'tenki.git_auth_secret must be the name of a Luxor secret, as a placeholder names it: a letter or '
             'underscore, then up to 127 letters, digits, underscores and hyphens'
         )
     raw = cfg.get('git_auth_url')
     if raw is not None and not isinstance(raw, str):
-        raise ValueError('tenki.git_auth_url must be a URL such as https://github.com/acme/')
+        raise ConfigError('tenki.git_auth_url must be a URL such as https://github.com/acme/')
     prefix = _git_auth_url((raw or '').strip() or _DEFAULT_GIT_AUTH_URL)
     if not policies:
-        raise ValueError(
+        raise ConfigError(
             'tenki.git_auth_secret is set but tenki.secret_policies is empty. Luxor adds the secret only to '
             'requests an attached policy allows: name the policy that covers the repositories under '
             f'{prefix} in tenki.secret_policies.'
@@ -307,7 +307,7 @@ def _git_auth_settings(cfg, policies: tuple[str, ...], domains: tuple[str, ...])
     if not any(
         domain == host or (domain.startswith('*.') and host.partition('.')[2] == domain[2:]) for domain in domains
     ):
-        raise ValueError(
+        raise ConfigError(
             f'tenki.git_auth_url is on {host}, which tenki.allow_domains does not list, so the sandbox could '
             f'not reach it: add {host} to tenki.allow_domains.'
         )
@@ -378,7 +378,7 @@ def _label(cfg) -> str:
     label = str(cfg.get('label') or '').strip()
     if label and not _LABEL.fullmatch(label):
         # The rule before the value: the engine cuts a startup error at its first asterisk.
-        raise ValueError(
+        raise ConfigError(
             'tenki.label must be 1 to 32 lowercase letters, digits or "-", starting with a letter or digit, or be '
             f'left empty; it is {label!r}'
         )
@@ -393,7 +393,7 @@ def _tool_groups(raw) -> tuple[frozenset, list[str]]:
         return TOOL_GROUPS, unknown
     if not names & TOOL_GROUPS:
         # Not every group: a typo must not publish more than the operator asked for.
-        raise ValueError(
+        raise ConfigError(
             f'tenki.toolGroups matched no known tool group: {", ".join(sorted(names))}. Valid groups: '
             f'{", ".join(sorted(TOOL_GROUPS))}, or "all". Leave the field empty for every group.'
         )

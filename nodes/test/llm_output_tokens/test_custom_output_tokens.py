@@ -132,6 +132,7 @@ def _real_get_node_config(service: dict, warnings: list | None = None):
     rocketlib = types.ModuleType('rocketlib')
     rocketlib.getServiceDefinition = lambda logicalType: service
     rocketlib.IJson = FakeIJson
+    rocketlib.ConfigError = type('ConfigError', (ValueError,), {})
     rocketlib.warning = warnings.append if warnings is not None else (lambda *a, **kw: None)
     stubs = {'rocketlib': rocketlib}
     if importlib.util.find_spec('json5') is None:
@@ -189,6 +190,8 @@ def _start_openai_node(monkeypatch, conn_config: dict, warnings: list | None = N
     """
     from ai.common.config import Config
 
+    # A profile without its own key starts on OPENAI_API_KEY (the node refuses no key at all)
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-test')
     get_node_config = _real_get_node_config(_service('llm_openai/services.json'), warnings)
     stub = types.ModuleType('langchain_openai')
     stub.ChatOpenAI = _RecordingChatOpenAI

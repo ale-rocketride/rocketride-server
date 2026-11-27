@@ -102,8 +102,23 @@ inline auto __call(Location location, Call &&call, Args &&...args) noexcept {
             excFunction = py::cast<std::string>(e.value().attr("function"));
             excLineno = py::cast<int>(e.value().attr("line"));
         } else {
-            // If this is our custom APERR exception
-            if (exception_type == "APERR") {
+            // Our custom APERR exception or a subclass of it (ConfigError):
+            // look for a class named APERR in the type's __mro__
+            bool isAperr = false;
+            try {
+                for (auto base : e.type().attr("__mro__")) {
+                    if (py::hasattr(base, "__name__") &&
+                        std::string(py::str(base.attr("__name__"))) ==
+                            "APERR") {
+                        isAperr = true;
+                        break;
+                    }
+                }
+            } catch (...) {
+                isAperr = exception_type == "APERR";
+            }
+
+            if (isAperr) {
                 if (py::hasattr(e.value(), "ec")) {
                     py::object ec_obj = e.value().attr("ec");
                     errorCode = static_cast<Ec>(

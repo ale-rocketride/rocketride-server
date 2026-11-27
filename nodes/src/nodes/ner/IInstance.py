@@ -45,6 +45,10 @@ class IInstance(IInstanceBase):
         """Initialize instance for a new object."""
         self.current_text = ''
         self.current_entities = []
+        # The object's first entity extraction failure is logged at ERROR, the rest at WARNING
+        recognizer = getattr(self.IGlobal, 'recognizer', None)
+        if recognizer is not None:
+            recognizer.new_object()
 
     def writeText(self, text: str):
         """

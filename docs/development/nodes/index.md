@@ -297,6 +297,23 @@ standalone catalog nodes.
 6. Optionally add a `test` section to `services.json` for automated testing (see
    [Node Testing](testing.md)).
 
+### Telemetry and node classes
+
+With telemetry on, the task process (`ai/node.py`) calls
+`ai.common.telemetry.relay.install()` before the engine loads any node. From then
+on, every `IInstanceBase` / `IGlobalBase` subclass gets its handlers wrapped when the
+class is defined, so the dependency calls a handler makes (HTTP, databases, Redis,
+the model server) are attributed to that node's component. A node class defined
+before `install()` is not wrapped: it is named in one warning line
+(`telemetry: N node classes defined before telemetry started are not traced: ...`)
+and its calls are still measured, without a component. The same holds for a
+subclass defined later that inherits a handler from such a class: the wrapping
+follows the class that defines the handler. Nodes need no code for this.
+The model server requests go through `ModelClient.send_command`, which calls
+`telemetry.model_server_call()`; a driver a node installs with `depends()` is picked
+up through `depends.after_install_hooks`. With telemetry off nothing is wrapped,
+no hook is registered and `model_server_call()` does nothing.
+
 ---
 
 ## Prototyping a Node

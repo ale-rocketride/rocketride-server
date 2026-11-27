@@ -23,7 +23,7 @@
 
 from .IGlobal import IGlobal
 from ai.common.llm_base import LLMBase
-from rocketlib import AVI_ACTION, warning
+from rocketlib import AVI_ACTION, warning, error
 from ai.common.schema import Doc
 from ai.common.avi.descriptor import rename_ext
 
@@ -41,6 +41,18 @@ class IInstance(LLMBase):
     # a late-arriving writeDocuments from frame N cannot bleed into frame N+1.
     _cached_answer: str | None = None
     _cache_from_image: bool = False
+
+    def open(self, obj):
+        """Start an object: its first inference failure is logged at ERROR again."""
+        self._failures_logged = set()
+
+    def _log_failure(self, kind: str, message: str) -> None:
+        """Log the first failure of a kind per object at ERROR and the later ones at WARNING."""
+        logged = getattr(self, '_failures_logged', None)
+        if logged is None:
+            logged = self._failures_logged = set()
+        (warning if kind in logged else error)(message)
+        logged.add(kind)
 
     def writeImage(self, action: int, mimeType: str, buffer: bytes):
         """Handle AVI image protocol for streaming image frames."""
@@ -82,7 +94,7 @@ class IInstance(LLMBase):
                     self._cache_from_image = True
                     self.instance.writeText(self._cached_answer)
                 except Exception as e:
-                    warning(f'OpenAI Vision: inference failed on image lane: {e}')
+                    self._log_failure('frame', f'OpenAI Vision: inference failed on image lane: {e}')
 
             self.image_data = None
             return self.preventDefault()
@@ -120,7 +132,7 @@ class IInstance(LLMBase):
                     answer = self.IGlobal._chat.chat(question)
                 except Exception as e:
                     chunk_id = doc.metadata.chunkId if doc.metadata else 'unknown'
-                    warning(f'OpenAI Vision: inference failed for chunk {chunk_id}: {e}')
+                    self._log_failure('chunk', f'OpenAI Vision: inference failed for chunk {chunk_id}: {e}')
                     continue
 
                 answer_text = answer.getText()

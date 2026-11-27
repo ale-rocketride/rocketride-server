@@ -1,0 +1,25 @@
+# The OpenTelemetry SDK and the instrumentations of dependency calls (the
+# table in _deps.py). Installed only when telemetry is used: by install_sdk()
+# in __init__.py (RR_OTEL_AUTO_INSTALL) or by an image build. No module
+# installs it on import, so with telemetry off none of these is installed.
+#
+# depends.py compiles every ai/**/requirement*.txt into the engine-wide
+# constraints, so these versions are resolved together with the nodes'.
+#
+# Exact versions: the SDK at the release the nodes' lock resolves
+# (nodes/src/nodes/constraints.lock), the instrumentations at the contrib
+# release made with it (SDK 1.N pairs with contrib 0.(N+21)b*). Move them
+# together; _deps.check_installed() fails an image build on a mismatch.
+# OTLP over HTTP/protobuf: no gRPC wheels.
+opentelemetry-sdk==1.42.1
+opentelemetry-exporter-otlp-proto-http==1.42.1
+opentelemetry-instrumentation-aiohttp-client==0.63b1
+opentelemetry-instrumentation-botocore==0.63b1
+opentelemetry-instrumentation-grpc==0.63b1
+opentelemetry-instrumentation-httpx==0.63b1
+opentelemetry-instrumentation-psycopg==0.63b1
+opentelemetry-instrumentation-psycopg2==0.63b1
+opentelemetry-instrumentation-pymongo==0.63b1
+opentelemetry-instrumentation-requests==0.63b1
+opentelemetry-instrumentation-threading==0.63b1
+opentelemetry-instrumentation-urllib3==0.63b1

@@ -22,3 +22,18 @@ ac6a40ae05fc07e87d2d825b7daf6eaeb9af8caf:packages/server/engine-core/test/crypto
 # at runtime; these fingerprints cover the original commit still in the PR range.
 bbe1c7130b0ffc708767d4b7a7dc676f27f44a01:packages/ai/tests/ai/modules/task/test_task_db_credential.py:generic-api-key:233
 bbe1c7130b0ffc708767d4b7a7dc676f27f44a01:packages/ai/tests/ai/modules/task/test_task_db_credential.py:generic-api-key:234
+
+# False positive: stand-in secrets ('abcdef123456', 'hunter22', 'Xy7abcdefghij'...)
+# in the log-redaction tests, which must look like real credentials to prove
+# they are removed. The lines now carry 'gitleaks:allow'; these fingerprints cover
+# the original commit still in the PR range.
+26e0e18d00a8d1018647055f2d71c873eadc071e:packages/ai/tests/ai/common/test_logfmt.py:private-key:139
+26e0e18d00a8d1018647055f2d71c873eadc071e:packages/ai/tests/ai/common/test_logfmt.py:generic-api-key:133
+26e0e18d00a8d1018647055f2d71c873eadc071e:packages/ai/tests/ai/common/test_logfmt.py:generic-api-key:134
+26e0e18d00a8d1018647055f2d71c873eadc071e:packages/ai/tests/ai/common/test_logfmt.py:generic-api-key:135
+26e0e18d00a8d1018647055f2d71c873eadc071e:packages/ai/tests/ai/common/test_logfmt.py:generic-api-key:136
+26e0e18d00a8d1018647055f2d71c873eadc071e:packages/ai/tests/ai/common/test_logfmt.py:generic-api-key:137
+26e0e18d00a8d1018647055f2d71c873eadc071e:packages/ai/tests/ai/common/test_logfmt.py:generic-api-key:138
+26e0e18d00a8d1018647055f2d71c873eadc071e:packages/ai/tests/ai/common/test_llm_base_provider_errors.py:generic-api-key:130
+26e0e18d00a8d1018647055f2d71c873eadc071e:packages/ai/tests/ai/common/test_llm_base_provider_errors.py:generic-api-key:131
+26e0e18d00a8d1018647055f2d71c873eadc071e:packages/ai/tests/ai/common/test_telemetry_deps.py:generic-api-key:86

@@ -62,63 +62,12 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping
-from typing import Any, FrozenSet, Optional, Tuple
-from urllib.parse import unquote_plus
+from typing import Any, Optional
+
+# The credential names: one list with the server's log lines (re-exported here)
+from ai.common.secret_names import SENSITIVE_PARAM_SUFFIXES, SENSITIVE_QUERY_PARAMS, is_sensitive_param  # noqa: F401
 
 REDACTED = '[redacted]'
-
-# Query parameter names whose values are replaced, in canonical form: lower case,
-# letters and digits only, after percent-decoding, so ``api-key``, ``API_KEY`` and
-# ``apikey`` are one name. Values are never decoded.
-SENSITIVE_QUERY_PARAMS: FrozenSet[str] = frozenset(
-    {
-        # OAuth / OIDC
-        'code',
-        'state',
-        'idtoken',
-        'accesstoken',
-        'refreshtoken',
-        'clientsecret',
-        'codeverifier',
-        # Credentials this engine and its clients put in query strings
-        'auth',  # AuthMiddleware header fallback; chat/dropper links; MCP upload URLs
-        'token',  # /task/fetch signed JWT; task tokens on /task/*
-        'tokens',  # OAuth broker result on /auth/vscode/*
-        # Other usual credential carriers
-        'apikey',
-        'apitoken',
-        'accesskey',
-        'secretkey',
-        'privatekey',
-        'key',
-        'authorization',
-        'bearer',
-        'jwt',
-        'password',
-        'passwd',
-        'secret',
-        'session',
-        'sessionid',
-        'sig',
-        'signature',
-    }
-)
-
-# Canonical endings that mark a credential, so ``github_token``, ``db-password`` and
-# ``X-Amz-Signature`` match without being listed. ``key`` counts only as a whole
-# name: as an ending it would also take ``sort_key`` or ``primary_key``.
-SENSITIVE_PARAM_SUFFIXES: Tuple[str, ...] = (
-    'token',
-    'secret',
-    'password',
-    'passwd',
-    'apikey',
-    'accesskey',
-    'secretkey',
-    'privatekey',
-    'sessionid',
-    'signature',
-)
 
 # The token segment of a directory-capability URL (fetch.handle_fetch_dir). Not
 # anchored: an absolute-form target has the scheme and host in front of the path.
@@ -141,12 +90,6 @@ HTTP_ACCESS_TEMPLATE = '%s - "%s %s HTTP/%s" %d'  # args: client, method, target
 WEBSOCKET_TEMPLATE_PREFIX = '%s - "WebSocket %s"'  # args: client, target[, status]
 _HTTP_TARGET_INDEX = 2
 _WEBSOCKET_TARGET_INDEX = 1
-
-
-def is_sensitive_param(name: str) -> bool:
-    """Tell whether a query parameter name, as sent, names a credential."""
-    canonical = re.sub(r'[^a-z0-9]', '', unquote_plus(name).lower())
-    return canonical in SENSITIVE_QUERY_PARAMS or canonical.endswith(SENSITIVE_PARAM_SUFFIXES)
 
 
 def redact_query_string(query: str) -> str:

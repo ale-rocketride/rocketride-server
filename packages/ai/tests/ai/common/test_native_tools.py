@@ -441,6 +441,37 @@ def test_a_failed_stream_falls_back_to_one_invoke(monkeypatch):
     assert (answer.getText(), answer.stopReason, finished) == ('Done.', 'end_turn', ['end_turn'])
 
 
+def test_a_turn_is_one_model_call_with_its_failed_stream_as_a_retry(monkeypatch):
+    # The trace's GenAI span: one logical call per turn, as for a prompt (chat_string)
+    from ai.common.telemetry import relay
+
+    calls = []
+    monkeypatch.setattr(relay, 'model_call', lambda *args: calls.append(args))
+    monkeypatch.setattr(relay, '_write', lambda line: None)  # the relay on, as in a task process
+    reply = {
+        'id': 'msg_3',
+        'type': 'message',
+        'role': 'assistant',
+        'model': 'claude-sonnet-4-6',
+        'content': [{'type': 'text', 'text': 'Done.'}],
+        'stop_reason': 'end_turn',
+        'stop_sequence': None,
+        'usage': {'input_tokens': 10, 'output_tokens': 2},
+    }
+    error = {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': 'bad stream'}}
+    rejected = (400, 'application/json', json.dumps(error).encode())
+    transport = _Transport(rejected, rejected, (200, 'application/json', json.dumps(reply).encode()))
+    chat = _anthropic_driver(monkeypatch, transport, thinking=False)
+
+    chat.chat(_turn(), on_chunk=lambda _t: None)
+
+    ((operation, provider, model, start, end, error_type, message, retries, _usage),) = calls
+    assert (operation, provider, model, error_type, message) == ('chat', 'anthropic', 'claude-sonnet-4-6', None, '')
+    assert end >= start > 0
+    # the production classifier: a 400 the provider refused is provider_error (another 4xx)
+    assert retries and all(kind == 'provider_error' and wait == 0.0 for _at, kind, wait in retries)
+
+
 def test_an_openai_reasoning_turn_round_trips_encrypted_reasoning(monkeypatch):
     pytest.importorskip('langchain_openai')
     import httpx

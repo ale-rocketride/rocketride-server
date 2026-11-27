@@ -40,7 +40,7 @@ depends(requirements)
 from typing import Any, Dict, Tuple
 from ai.common.schema import Answer, Question
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from ai.common.llm_adapter import report_llm_tokens
 from ai.common.validation import validate_prompt
 
@@ -91,13 +91,13 @@ class Chat(ChatBase):
 
         # API key validation with specific error messages
         if not api_key:
-            raise ValueError('Missing Mistral AI API key. Please check your configuration.')
+            raise ConfigError('Missing Mistral AI API key. Please check your configuration.')
         if api_key.startswith('sk-'):
-            raise ValueError(
+            raise ConfigError(
                 'Invalid API key format. You seem to be using an OpenAI API key. Please provide a Mistral AI API key.'
             )
         if api_key.startswith('AI'):
-            raise ValueError(
+            raise ConfigError(
                 'Invalid API key format. You seem to be using a Google AI/Gemini API key. Please provide a Mistral AI API key.'
             )
 

@@ -27,7 +27,7 @@ import json
 import os
 from typing import Any, Dict, Optional
 
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from ai.common.utils import decode_data_url
 
 _MAX_SCHEMA_BYTES = 2 * 1024 * 1024
@@ -57,7 +57,7 @@ def get_node_config(logical_type: str, conn_config: Dict[str, Any]) -> Dict[str,
 def build_client(api_key: Optional[str], environment: Optional[str] = None):
     """Build a fresh ``LandingAIADE`` client (one per call for concurrency safety)."""
     if not api_key:
-        raise ValueError('Landing.ai: no API key configured')
+        raise ConfigError('Landing.ai: no API key configured')
 
     from landingai_ade import LandingAIADE
 
@@ -93,22 +93,22 @@ def load_schema_from_data_url(value: str) -> Dict[str, Any]:
     ADE, never read for field values or written to disk.
     """
     if not value:
-        raise ValueError('Landing.ai Extract: no extraction schema uploaded')
+        raise ConfigError('Landing.ai Extract: no extraction schema uploaded')
 
     try:
         raw, _mime = decode_data_url(value)
     except Exception as e:  # noqa: BLE001 — bad base64/data-url -> uniform ValueError
-        raise ValueError(f'Landing.ai Extract: could not decode the uploaded schema: {e}')
+        raise ConfigError(f'Landing.ai Extract: could not decode the uploaded schema: {e}')
 
     if len(raw) > _MAX_SCHEMA_BYTES:
-        raise ValueError(f'Landing.ai Extract: uploaded schema is too large ({len(raw)} bytes > {_MAX_SCHEMA_BYTES})')
+        raise ConfigError(f'Landing.ai Extract: uploaded schema is too large ({len(raw)} bytes > {_MAX_SCHEMA_BYTES})')
 
     try:
         # RecursionError guards against pathologically nested JSON that slips under the size cap.
         schema = json.loads(raw.decode('utf-8'))
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as e:
-        raise ValueError(f'Landing.ai Extract: uploaded schema is not valid JSON: {e}')
+        raise ConfigError(f'Landing.ai Extract: uploaded schema is not valid JSON: {e}')
 
     if not isinstance(schema, dict):
-        raise ValueError('Landing.ai Extract: extraction schema must be a JSON object')
+        raise ConfigError('Landing.ai Extract: extraction schema must be a JSON object')
     return schema

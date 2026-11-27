@@ -103,7 +103,7 @@ def _install_min_stubs() -> None:
     ai_common.__path__ = []
     sys.modules['ai.common'] = ai_common
 
-    _mk('ai.common.config', Config=_Config)
+    _mk('ai.common.config', Config=_Config, ConfigError=type('ConfigError', (ValueError,), {}))
     _mk('ai.common.reader', ReaderBase=_ReaderBase)
     _mk('ai.common.models', EasyOCR=_Engine, DocTR=_Engine, Surya=_Engine, TrOCR=_Engine)
     _mk('numpy', ndarray=_NDArray)

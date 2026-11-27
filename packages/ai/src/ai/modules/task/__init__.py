@@ -2,6 +2,7 @@ from typing import Dict, Any
 from ai.web import WebServer
 from .task_server import TaskServer
 from .task_scheduler import TaskScheduler
+from .live_runs import LiveRuns
 from .run_log import sweep_spool_root
 from .fetch import handle_fetch, handle_fetch_dir
 
@@ -36,6 +37,11 @@ def initModule(server: WebServer, config: Dict[str, Any]):
     server.app.state.scheduler = scheduler
     scheduler.start()
 
+    # The runs in progress, in the store every minute: a dead engine's runs are
+    # counted as engine_lost by the next engine (telemetry on only)
+    live_runs = LiveRuns(task_server.live_identities)
+    live_runs.start()
+
     # The app BUILD WORKER: compiles deployed app source zips into their
     # servable dist/ trees. Lives beside the scheduler (same lifecycle
     # ownership); its startup sweep requeues builds a previous process left
@@ -47,6 +53,8 @@ def initModule(server: WebServer, config: Dict[str, Any]):
     build_worker.start()
 
     async def _shutdown() -> None:
+        # first: the runs still in progress are the ones this stop loses
+        await live_runs.shutdown()
         await build_worker.shutdown()
         await scheduler.shutdown()
         await task_server.shutdown()

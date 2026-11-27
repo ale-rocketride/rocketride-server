@@ -23,6 +23,9 @@
 
 #pragma once
 
+#include <mutex>
+#include <string>
+
 namespace engine::store {
 namespace py = pybind11;
 
@@ -134,30 +137,6 @@ public:
     //---------------------------------------------------------------------
 
     /**
-     * @brief Called when a service instance is entered.
-     *
-     * Increments internal recursion tracking and logs entry.
-     * If trace is non-null, appends it to the monitor message.
-     *
-     * @param pInstance Pointer to the service instance being entered.
-     * @param trace Optional JSON trace data to append to the monitor message.
-     */
-    void debugEnter(IServiceFilterInstance *pInstance,
-                    const json::Value &trace = {}) noexcept;
-
-    /**
-     * @brief Called when a service instance is exited.
-     *
-     * Decrements internal recursion tracking and logs exit.
-     * If trace is non-null, appends it to the monitor message.
-     *
-     * @param pInstance Pointer to the service instance being exited.
-     * @param trace Optional JSON trace data to append to the monitor message.
-     */
-    void debugLeave(IServiceFilterInstance *pInstance,
-                    const json::Value &trace = {}) noexcept;
-
-    /**
      * @brief Called when a logical "break" is triggered between two service
      * instances.
      *
@@ -189,6 +168,59 @@ public:
 
     // Get the task id of the associated debugger endpoint
     std::string getTaskId() const noexcept;
+
+    /**
+     * @brief The trace id of the pass this pipe is running (32 hex chars).
+     *
+     * A pass is one run of the pipeline over an object on this pipe: it
+     * begins with the outermost Level and ends when that level ends, as
+     * EaaS's telemetry counts it. Only with --otel_pass_ids (EaaS passes it
+     * while telemetry is on): the id is new for each pass and sent as "tid"
+     * with every ENTER/LEAVE event; Python nodes read it as
+     * instance.passTraceId, so a call they make (the model server) can carry
+     * it and be traced inside the pipeline's trace. Empty otherwise, and
+     * between passes.
+     */
+    std::string passTraceId() const noexcept;
+
+    /**
+     * @brief One level of the pipe's execution trace: the ENTER event when
+     * it is constructed, the LEAVE event when it is destroyed.
+     *
+     * Call leave() with the leave trace once the call's result is known; the
+     * LEAVE event is sent when the level goes out of scope. If an exception
+     * leaves the scope before leave() (the leave trace was never built), no
+     * LEAVE event is sent, but the level still ends, and with it the pass at
+     * the outermost level, so the next pass gets an id of its own.
+     */
+    class Level {
+    public:
+        Level(Debugger &debugger, IServiceFilterInstance *pInstance,
+              const json::Value &enterTrace) noexcept
+            : m_debugger(debugger), m_pInstance(pInstance) {
+            m_debugger.debugEnter(m_pInstance, enterTrace);
+        }
+        ~Level() {
+            if (m_hasLeave)
+                m_debugger.debugLeave(m_pInstance, m_leaveTrace);
+            else
+                m_debugger.debugUnwind();
+        }
+        Level(const Level &) = delete;
+        Level &operator=(const Level &) = delete;
+
+        /// The leave trace; the LEAVE event is sent when the level ends
+        void leave(json::Value trace) {
+            m_leaveTrace = std::move(trace);
+            m_hasLeave = true;
+        }
+
+    private:
+        Debugger &m_debugger;
+        IServiceFilterInstance *m_pInstance;
+        json::Value m_leaveTrace;
+        bool m_hasLeave = false;
+    };
 
     /// Stop task execution immediately.
     void taskStop() noexcept;
@@ -242,8 +274,42 @@ private:
     void _outputBreakpoint(const std::string &msg,
                            const Breakpoint &bp) noexcept;
 
-    /// Tracks the recursion level of nested debugEnter/debugLeave calls.
-    int m_recurseLevel = 0;
+    //---------------------------------------------------------------------
+    // Execution tracing hooks (only through Level)
+    //---------------------------------------------------------------------
+
+    /**
+     * @brief Called when a service instance is entered.
+     *
+     * Increments internal recursion tracking and logs entry.
+     * If trace is non-null, appends it to the monitor message.
+     *
+     * @param pInstance Pointer to the service instance being entered.
+     * @param trace Optional JSON trace data to append to the monitor message.
+     */
+    void debugEnter(IServiceFilterInstance *pInstance,
+                    const json::Value &trace = {}) noexcept;
+
+    /**
+     * @brief Called when a service instance is exited.
+     *
+     * Decrements internal recursion tracking and logs exit.
+     * If trace is non-null, appends it to the monitor message.
+     *
+     * @param pInstance Pointer to the service instance being exited.
+     * @param trace Optional JSON trace data to append to the monitor message.
+     */
+    void debugLeave(IServiceFilterInstance *pInstance,
+                    const json::Value &trace = {}) noexcept;
+
+    /// Ends the level a debugEnter began when its debugLeave will not come
+    /// (an exception between them): no event, but the pass ends.
+    void debugUnwind() noexcept;
+
+    /// The levels of nested debugEnter/debugLeave calls and the current
+    /// pass's trace id (passTraceId). Used only with --otel_pass_ids while the
+    /// app monitor is on; the debugger checks both on every call.
+    PassIds m_passIds;
 
     /// Collection of encoded breakpoint identifiers (e.g., ("A", "B", "text")
     std::mutex m_breakpoint_lock;  ///< Mutex for guarding breakpoint list

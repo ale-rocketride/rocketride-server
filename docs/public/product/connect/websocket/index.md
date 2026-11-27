@@ -141,11 +141,12 @@ than inferring one from the prose.
 
 These codes ride command replies. A task key rejected while the connection is
 still being established — on the HTTP request or the WebSocket upgrade — is
-answered by the web layer with a generic `400 Bad request` carrying neither a
-message nor a code, deliberately, so that a rejected credential reveals nothing
-about why it was rejected. A client therefore cannot tell an invalidated task
+answered by the web layer with a generic `401 Authentication failed` carrying
+no code, deliberately, so that a rejected credential reveals nothing about why
+it was rejected. A client therefore cannot tell an invalidated or unknown task
 key from any other bad credential at connect time; the codes above appear only
-once a command is in flight.
+once a command is in flight. A `500` at connect time is a failure on the server
+side, not a problem with the key: retry later.
 
 ### Validation (`rrext_validate`)
 

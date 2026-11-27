@@ -84,3 +84,24 @@ TEST_CASE("python::an error keeps its location after the next exception") {
     REQUIRE(first.location().function() == "first_fn");
     REQUIRE(second.location().function() == "other_fn");
 }
+
+TEST_CASE("python::an APERR subclass keeps its code and location") {
+    const auto error = callPython(localfcn()->Error {
+        py::exec(
+            "from rocketlib import ConfigError\n"
+            "def check_fn():\n    raise ConfigError('no key')\ncheck_fn()\n");
+        return {};
+    });
+
+    REQUIRE_ERROR(error, Ec::InvalidParam, "no key");
+    REQUIRE(error.location().function() == "check_fn");
+}
+
+TEST_CASE("python::a plain ValueError is an exception, not InvalidParam") {
+    const auto error = callPython(localfcn()->Error {
+        py::exec("def parse_fn():\n    int('x')\nparse_fn()\n");
+        return {};
+    });
+
+    REQUIRE_ERROR(error, Ec::Exception, "invalid literal");
+}

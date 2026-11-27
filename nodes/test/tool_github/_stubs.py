@@ -122,6 +122,7 @@ def install_stubs(node_config: dict | None = None) -> None:
             return node_config if node_config is not None else {}
 
     mod_ai_common_config.Config = Config
+    mod_ai_common_config.ConfigError = type('ConfigError', (ValueError,), {})
     sys.modules['ai.common.config'] = mod_ai_common_config
 
     mod_ai_common_utils = types.ModuleType('ai.common.utils')

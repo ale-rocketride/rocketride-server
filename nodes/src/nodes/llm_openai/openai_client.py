@@ -25,9 +25,11 @@
 OpenAI binding for the ChatLLM.
 """
 
+import os
 from typing import Any, Dict
+
 from ai.common.chat import ChatBase
-from ai.common.config import Config
+from ai.common.config import Config, ConfigError
 from ai.common.model_gateway import (
     close_http_clients,
     hosted_http_clients,
@@ -92,6 +94,12 @@ class Chat(ChatBase):
                 self._hosted_output_cap = self._modelOutputTokens
             self._http_clients = hosted_http_clients(credentials.gateway)
             self._client_kwargs['max_retries'] = 0
+
+        # No key at all is the pipeline's to fix: refuse it as configuration, not
+        # as a start failure. The library falls back to OPENAI_API_KEY, so only
+        # when that is unset too.
+        if not (apikey or os.environ.get('OPENAI_API_KEY')):
+            raise ConfigError(f'{provider}: no API key is configured. Set "apikey" on the node, or a variable for it.')
 
         # Reasoning models stream via the Responses API + max_completion_tokens.
         if self._is_reasoning:
