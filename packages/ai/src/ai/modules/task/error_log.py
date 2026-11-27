@@ -93,6 +93,7 @@ class TaskErrorLog:
         self._write = write
         self._fmt = logfmt.log_format()
         self._traceback: Optional[List[str]] = None
+        self._cut = 0  # lines cut from the middle of the traceback being read
         # An exception line was seen: the traceback ends there unless a chained
         # exception follows ('During handling…'), which the next lines tell
         self._ended = False
@@ -105,6 +106,7 @@ class TaskErrorLog:
     def reset(self) -> None:
         """A new run of the task: nothing pending, a full allowance."""
         self._traceback = None
+        self._cut = 0  # lines cut from the middle of the traceback being read
         self._ended = False
         self.first = None
         self._seen = []
@@ -136,10 +138,13 @@ class TaskErrorLog:
                 if line and not line[0].isspace() and line != _TRACEBACK_START and not line.startswith(_CHAINED):
                     self._ended = True
                 elif len(self._traceback) > MAX_TRACEBACK_LINES:
-                    self._flush_traceback()
+                    # too long: its middle is cut, so the record still ends at its
+                    # exception line (the message), with the first and last frames
+                    del self._traceback[MAX_TRACEBACK_LINES // 2]
+                    self._cut += 1
                 return
         if line.startswith(_TRACEBACK_START):
-            self._traceback = [line]
+            self._traceback, self._cut = [line], 0
         elif _ERROR_PREFIX.match(line):
             self._record(line)
 
@@ -191,8 +196,11 @@ class TaskErrorLog:
 
     def _flush_traceback(self) -> None:
         lines, self._traceback, self._ended = self._traceback or [], None, False
+        cut, self._cut = self._cut, 0
         if not lines:
             return
+        if cut:
+            lines.insert(MAX_TRACEBACK_LINES // 2, f'  ... {cut} lines cut ...')
         # the exception that propagated: the last non-indented line (after any chain)
         last = next((line for line in reversed(lines) if line.strip() and not line[0].isspace()), '')
         exc_type = last.split(':', 1)[0].strip() if ':' in last else last.strip()

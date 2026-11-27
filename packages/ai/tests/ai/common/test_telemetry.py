@@ -875,7 +875,7 @@ def test_the_org_id_is_on_spans_and_lines_always_and_on_metrics_only_when_asked(
 
     telemetry, spans, reader = make(org_attribute=False, org_cardinality=1)
     for n in range(2):
-        identity = {'org_id': f'org-{n}', 'run_kind': 'dev'}
+        identity = {'org_id': f'org-{n}', 'run_kind': 'dev', 'project_id': f'proj-{n}'}
         for event in (
             {'event': 'apaevt_status_update', 'body': {'state': 1}},
             {'event': 'apaevt_task', 'body': {'action': 'begin', 'name': 'x'}},
@@ -888,11 +888,19 @@ def test_the_org_id_is_on_spans_and_lines_always_and_on_metrics_only_when_asked(
     )
     collected = points(reader)
     for name, entries in collected.items():
-        assert all('rocketride.org.id' not in attrs for attrs, _ in entries), name
+        # nor the project id: a project names one customer as surely as the org id
+        assert all('rocketride.org.id' not in attrs and 'rocketride.project.id' not in attrs for attrs, _ in entries), (
+            name
+        )
     assert telemetry.attributed_orgs() == frozenset()
+    # one series for both customers' runs, and no org counted past the cap
+    ended = [p for attrs, p in collected['rocketride.task.ended'] if p.value]
+    assert len(ended) == 1 and ended[0].value == 2
+    assert telemetry._set_limits['rocketride.task.ended'] == _otel.MAX_ATTRIBUTE_SETS
     kept = finished(telemetry, spans)
     # spans: every org, uncapped (a span makes no series)
     assert {s.attributes.get('rocketride.org.id') for s in kept if s.name == 'task'} == {'org-0', 'org-1'}
+    assert {s.attributes.get('rocketride.project.id') for s in kept if s.name == 'task'} == {'proj-0', 'proj-1'}
     assert [s.attributes['rocketride.org.id'] for s in kept if s.name == 'execute'] == ['org-1']
     lines = [json.loads(x) for x in capsys.readouterr().out.splitlines() if 'rocketride.task.ended' in x]
     assert {line['org_id'] for line in lines} == {'org-0', 'org-1'}
@@ -1020,6 +1028,13 @@ def test_sampled_traceparent_makes_a_child_server_span(sink):
     assert span.attributes['rpc.system.name'] == 'rocketride_dap'
 
 
+def test_a_request_for_an_unknown_method_is_named_after_the_rpc_system(sink):
+    telemetry, spans, _ = sink
+    telemetry.request_done('_OTHER', None, 0.05, f'00-{PARENT_TRACE}-b7ad6b7169203331-01')
+    (span,) = [s for s in finished(telemetry, spans) if s.attributes.get('rpc.method') == '_OTHER']
+    assert span.name == 'rocketride_dap'  # semconv rpc-spans: {rpc.system.name} for _OTHER
+
+
 @pytest.mark.parametrize(
     'traceparent',
     [
@@ -1035,6 +1050,22 @@ def test_no_span_without_a_sampled_valid_traceparent(sink, traceparent):
     telemetry.request_done('execute', None, 0.05, traceparent)
     assert not [s for s in finished(telemetry, spans) if s.name == 'execute']
     assert value(points(reader), 'rpc.server.call.duration', rpc__method='execute').count == 1
+
+
+def test_the_caller_trace_limit_is_the_operators_to_set(monkeypatch):
+    built = []
+    monkeypatch.setattr(_otel, '_check_transport', lambda environ: '')
+    monkeypatch.setattr(Telemetry, '__init__', lambda self, **kwargs: built.append(kwargs['caller_traces_per_minute']))
+    Telemetry.from_environment(environ={})
+    Telemetry.from_environment(environ={'RR_OTEL_CALLER_TRACES_PER_MINUTE': '20'})
+    assert built == [100.0, 20.0]
+    monkeypatch.undo()
+
+    telemetry, spans, _ = make(caller_traces_per_minute=20)  # a tenth per org: 2
+    sampled = f'00-{PARENT_TRACE}-b7ad6b7169203331-01'
+    for _ in range(3):
+        telemetry.request_done('execute', None, 0.05, sampled, identity={'org_id': 'org-a'})
+    assert len([s for s in finished(telemetry, spans) if s.name == 'execute']) == 2
 
 
 def test_caller_sampled_requests_are_limited_per_org(sink):

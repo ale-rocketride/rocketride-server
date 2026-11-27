@@ -172,7 +172,8 @@ def install(argv: Sequence[str] = sys.argv) -> List[str]:
             # spans unsanitized. The instrumentations are given this one.
             tracer_provider = TracerProvider(shutdown_on_exit=False)
             tracer_provider.add_span_processor(relay_spans())
-        done, _skipped, _recorders = _deps.instrument(tracer_provider, flags, emit, current_pass_trace_id)
+        done, skipped, _recorders = _deps.instrument(tracer_provider, flags, emit, current_pass_trace_id)
+        _deps._warn_skipped(skipped)
         _watch_depends()
         _propagate_to_threads()
         return done
@@ -180,16 +181,32 @@ def install(argv: Sequence[str] = sys.argv) -> List[str]:
         return []
 
 
-def _watch_depends() -> None:
-    """A node installs its driver with depends() and imports it after: record it right then (depends' hook)."""
+def _watch_depends() -> bool:
+    """
+    A node installs its driver with depends() and imports it after: record it right
+    then (depends' hook). A depends.py older than its after_install_hooks (an engine
+    image built before them) cannot tell: the drivers nodes install are then not
+    traced, said in one warning line.
+    """
     try:
         import depends as module  # type: ignore
-
-        hooks = module.after_install_hooks
-        if _depends_installed not in hooks:
-            hooks.append(_depends_installed)
     except Exception:
-        pass
+        return False  # not an engine process: nothing installs drivers
+    hooks = getattr(module, 'after_install_hooks', None)
+    if not isinstance(hooks, list):
+        try:
+            from rocketlib import warning
+
+            warning(
+                "telemetry: this engine's depends.py has no after_install_hooks (built before them):"
+                ' the drivers nodes install while the run starts are not traced'
+            )
+        except Exception:
+            pass
+        return False
+    if _depends_installed not in hooks:
+        hooks.append(_depends_installed)
+    return True
 
 
 def _depends_installed(_requirements: Optional[str]) -> None:

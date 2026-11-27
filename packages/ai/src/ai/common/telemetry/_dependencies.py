@@ -35,6 +35,7 @@ from opentelemetry import context as otel_context
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 
+from .. import logfmt
 from . import _deps
 
 from ._common import (
@@ -46,6 +47,7 @@ from ._common import (
     _RELAY_ATTRIBUTES,
     _GENAI_ATTRIBUTES,
     MAX_RELAYED_DROPPED,
+    MAX_RELAYED_RECORDS,
     ORIGIN_KEY,
     PROJECT_KEY,
     MAX_PIPELINE_SERVERS,
@@ -68,6 +70,9 @@ def _valid_retry(retry: Any) -> bool:
         return False
     at, _kind, wait = retry
     return all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (at, wait)) and math.isfinite(wait)
+
+
+_INT_ATTRIBUTES = ('server.port', 'http.response.status_code')
 
 
 class _DependenciesTelemetry:
@@ -116,7 +121,7 @@ class _DependenciesTelemetry:
         if not (end >= start > 0):
             return
         error_type = str(body['x'])[:MAX_VALUE_LENGTH] if body.get('x') else None
-        message = str(body.get('g') or '')[:MAX_CAUSE_LENGTH]
+        message = logfmt.redact(str(body.get('g') or '')[:MAX_CAUSE_LENGTH])  # from the run's process: redacted again
         retries = [r for r in body.get('r') or [] if _valid_retry(r)][:16]
         raw_usage = body.get('u') if isinstance(body.get('u'), dict) else {}
         usage = {k: v for k, v in raw_usage.items() if k in ('input', 'output', 'cache_read') and isinstance(v, int)}
@@ -199,20 +204,32 @@ class _DependenciesTelemetry:
     def dependency_relayed(self, task_id: str, body: Any, pipeline: Optional[Dict[str, Any]]) -> None:
         """Dependency calls a node made, relayed by the subprocess (relay.py, a batch): measured, then held by their pass."""
         records = body.get('calls') if isinstance(body, dict) else body
-        for record in records if isinstance(records, list) else []:
+        if not isinstance(records, list):
+            return
+        # relay.py writes at most relay.BATCH records a line, and its drops in one
+        # record: a line saying more is not believed past these bounds
+        if len(records) > MAX_RELAYED_RECORDS:
+            self.count_dropped('relay_overflow', len(records) - MAX_RELAYED_RECORDS)
+            records = records[:MAX_RELAYED_RECORDS]
+        budget = [MAX_RELAYED_DROPPED]  # dropped calls one line may report, all its records together
+        for record in records:
             if isinstance(record, dict):
                 # One record that cannot be read costs that record only, not the batch
                 try:
-                    self._relayed(task_id, record, pipeline)
+                    self._relayed(task_id, record, pipeline, budget)
                 except Exception:
                     self.count_hook_error('relay_record')
 
-    def _relayed(self, task_id: str, body: Mapping[str, Any], pipeline: Optional[Dict[str, Any]]) -> None:
+    def _relayed(
+        self, task_id: str, body: Mapping[str, Any], pipeline: Optional[Dict[str, Any]], budget: List[int]
+    ) -> None:
         if 'dropped' in body:
             dropped = body['dropped']
-            if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0:
+            if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0 and budget[0] > 0:
                 reason = body.get('reason') if body.get('reason') in ('relay_overflow',) else 'dependency_span_cap'
-                self.count_dropped(reason, min(dropped, MAX_RELAYED_DROPPED))
+                counted = min(dropped, budget[0])
+                budget[0] -= counted
+                self.count_dropped(reason, counted)
             return
         kind = body.get('k')
         if kind is not None:
@@ -328,7 +345,7 @@ class _DependenciesTelemetry:
             raised = [
                 component_type,
                 str(body.get('x') or 'Exception')[:MAX_VALUE_LENGTH],
-                str(body.get('g') or '')[:MAX_CAUSE_LENGTH],
+                logfmt.redact(str(body.get('g') or '')[:MAX_CAUSE_LENGTH]),
                 str(body.get('l') or '')[:MAX_CAUSE_LENGTH],
                 time.monotonic(),
                 None,
@@ -343,7 +360,7 @@ class _DependenciesTelemetry:
     def _node_error_mark(self, task_id: str, body: Mapping[str, Any], pipeline: Optional[Dict[str, Any]]) -> None:
         """A node's report that its call failed: kept on its pass, to mark the component span and the pass."""
         error_type = str(body.get('x') or 'error')[:64]
-        message = str(body.get('g') or '')[:256]
+        message = logfmt.redact(str(body.get('g') or '')[:256])
         with self._lock:
             run = self._runs.get(task_id)
             invocation = run.invocations.get(body.get('p')) if run is not None else None
@@ -448,6 +465,10 @@ class _DependenciesTelemetry:
             for key, value in attributes.items()
             if key not in ('_org', '_project', '_component', '_exemplar', 'url.template') and value not in (None, '')
         }
+        # semconv types these as int (a Prometheus label reads the same either way)
+        for key in _INT_ATTRIBUTES:
+            if values.get(key, '').isdigit():
+                values[key] = int(values[key])
         # A pipeline's servers are its customer's choice (their database, their
         # model endpoint): at most MAX_SERVERS_PER_ORG per customer and
         # MAX_PIPELINE_SERVERS in all, then '_other'
@@ -461,8 +482,9 @@ class _DependenciesTelemetry:
                 'error.type': self._bounded_error_type(values['error.type'], 'dependency'),
                 'server.address': values.get('server.address') or '_unknown',
             }
-            if org and self._org_attribute:
-                failed[ORG_KEY] = org
-            if attributes.get('_project'):
-                failed[PROJECT_KEY] = self._bounded_project(org, str(attributes['_project']))
+            if self._org_attribute:  # off: no org id and no project id (one customer each)
+                if org:
+                    failed[ORG_KEY] = org
+                if attributes.get('_project'):
+                    failed[PROJECT_KEY] = self._bounded_project(org, str(attributes['_project']))
             self._dependency_errors.add(1, self._bounded('rocketride.component.dependency_errors', failed))

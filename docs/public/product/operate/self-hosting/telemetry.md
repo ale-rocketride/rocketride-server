@@ -67,9 +67,10 @@ apply. The `RR_OTEL_*` variables exist only for what has no standard.
 | `RR_OTEL_SLOW_REQUEST_SECONDS` | `2` | A request, or a dependency call made outside any request, at least this long is kept (`0`: off) |
 | `RR_OTEL_INSTRUMENT` | `db,redis,http,aws,grpc,model` | The dependency calls traced and measured, the server's and the nodes': `db` (SQLAlchemy, and without it psycopg, psycopg2, pymongo, neo4j), `redis` (redis-py), `http` (httpx, requests, aiohttp, urllib3), `aws` (botocore), `grpc` (gRPC clients: Qdrant, Weaviate, Milvus, Google Cloud), `model` (the model server). `none` for none. All but `redis`, `model`, SQLAlchemy and neo4j need the instrumentation packages (see *Dependency calls*) |
 | `RR_OTEL_SLOW_REQUEST_EXCLUDE` | `rrext_cprofile_*` | Request names (shell patterns, comma-separated) that are slow by design and never kept for being slow |
+| `RR_OTEL_CALLER_TRACES_PER_MINUTE` | `100` | Most requests kept per minute by the process only because their caller sent a sampled `traceparent`; one org gets at most a tenth of it (at least 1). A caller cannot raise it. The rest are measured, counted in `rocketride.telemetry.dropped` as `caller_rate_limited`. Failed, slow and error-logged requests are not limited by it |
 | `RR_OTEL_SLOW_TRACES_PER_MINUTE` | `100` | Most slow traces kept per minute by the process; one run, or one org, gets at most a tenth of it (at least 1). The rest are counted in `rocketride.telemetry.dropped` as `slow_rate_limited`. Failed traces are never limited |
 | `RR_OTEL_COMPONENT_SPANS` | `200` | Maximum component spans per pipeline trace (`0`: none; at most `1000`) |
-| `RR_OTEL_ORG_ATTRIBUTE` | `false` | `true` puts the org id (`rocketride.org.id`) on metrics, for per-customer metrics. Each metric that carries it then has up to `RR_OTEL_ORG_CARDINALITY` (+1 for `_other`) times the series it has without it; plan the metrics backend's series limit for that. Spans and error log lines always carry the org id (they add no series) |
+| `RR_OTEL_ORG_ATTRIBUTE` | `false` | `true` puts the org id (`rocketride.org.id`) and the project id (`rocketride.project.id`) on metrics, for per-customer metrics. Each metric that carries it then has up to `RR_OTEL_ORG_CARDINALITY` (+1 for `_other`) times the series it has without it; plan the metrics backend's series limit for that. Spans and error log lines always carry the org id (they add no series) |
 | `RR_OTEL_ORG_CARDINALITY` | `2000` | Distinct org ids the process attributes, across all metrics; later ones are `_other` (counted in `rocketride.telemetry.dropped`) |
 | `RR_OTEL_AUTO_INSTALL` | off | `true` installs a missing SDK at startup, in the background (see above) |
 | `RR_OTEL_SHUTDOWN_TIMEOUT` | `3` | Seconds a shutdown may wait to flush |
@@ -147,18 +148,18 @@ Names and units follow the [OpenTelemetry semantic conventions](https://opentele
 RocketRide-specific attributes are namespaced `rocketride.*`.
 
 No label carries a user, email, project name, task name, file name or payload. The
-customer identifiers are the opaque org id (`rocketride.org.id`) and, on the
-per-customer metrics, the opaque id of the pipeline's project
-(`rocketride.project.id`: the same for every run of that pipeline; at most 50 per
-customer, then `_other`).
+customer identifiers are the opaque org id (`rocketride.org.id`) and the opaque id
+of the pipeline's project (`rocketride.project.id`: the same for every run of that
+pipeline; on metrics at most 50 per customer, then `_other`).
 
 **Per-customer metrics.** Spans and error log lines always carry the org id. On
 metrics it is opt-in: set `RR_OTEL_ORG_ATTRIBUTE=true` and the metrics the tables
-below list with `rocketride.org.id` carry it. Each such metric then has up to
+below list with `rocketride.org.id` carry it, and their `rocketride.project.id`
+(a project belongs to one customer, so it is on metrics only with the org id). Each such metric then has up to
 `RR_OTEL_ORG_CARDINALITY` orgs (default 2000, plus `_other`) times the attribute
 sets it has without the org id: with 2000 orgs, a metric with 30 label
 combinations can reach about 60,000 series in each server process. Off (the
-default), each of those metrics adds up all customers together.
+default), those metrics carry neither id: each adds up all customers together.
 
 A Prometheus-compatible backend shows `rocketride.task.ended` as
 `rocketride_task_ended_total` and `rocketride.task.duration` as
@@ -204,7 +205,7 @@ not kept, and those leave no exemplar. The backend must store exemplars (Mimir:
 | `rocketride.pass.idle` | gauge (s) | `rocketride.component.type`, `rocketride.org.id` | For each innermost open node type and org, the longest a pass has gone without an enter or leave while a call is still open: a hung node or a provider that never answers. A working agent stays near 0 (its tools enter and leave); an idle source has no pass open; a run with a debugger attached (the whole run, paused or not) and the exempt types are left out. 0 once no pass is idle, then gone 15 minutes later |
 | `rocketride.telemetry.up` | gauge | | 1 while telemetry exports (absence means telemetry is down) |
 | `rocketride.telemetry.hook_errors` | counter | `rocketride.telemetry.hook` | Hooks that raised and were ignored |
-| `rocketride.telemetry.dropped` | counter | `rocketride.telemetry.reason` | Telemetry dropped to stay within a bound: `trace_queue_full`, `span_budget`, `invocation_cap`, `run_evicted`, `stale_call` (with `RR_OTEL_STALE_CALL_SECONDS`: a call open that long was taken as a lost leave), `org_overflow`, `error_type_overflow`, `attribute_overflow`, `dependency_span_cap` (a dependency call left out of its trace), `dependency_undecided` (a dependency call whose request never ended), `dependency_metric_error`, `dependency_span_error`, `dependency_metric_overflow`, `relay_overflow` (a run's process queued more dependency calls than it holds), `pass_tid_reused` (the engine repeated a pass id: see *Dependency calls*), `info_overflow` (an info gauge, such as the organization names, past its observations per collection). By design, not a loss: `server_overflow` (a pipeline server past its customer's 20 or the 200 in all: `_other`), `pass_unwound` (a pass interrupted by an exception, exported unfinished when the next began), `error_log_duplicate`, `error_log_rate_limited`, `slow_rate_limited`, `caller_rate_limited` (a request past the limit on traces kept for a caller's sampled `traceparent`), `relay_late` (a node's dependency call outside any pass), `relay_unattributed` (one made on a thread the node started), `relay_global` (a node's call from its global handler, such as a key check when the run starts: measured with the node's type, in no question's trace) |
+| `rocketride.telemetry.dropped` | counter | `rocketride.telemetry.reason` | Telemetry dropped to stay within a bound: `trace_queue_full`, `export_queue_full` (spans waiting for a collector too slow or down, pushed out of the export queue), `export_failed` (spans the collector refused, did not answer in time or could not be reached for), `span_budget`, `invocation_cap`, `run_evicted`, `stale_call` (with `RR_OTEL_STALE_CALL_SECONDS`: a call open that long was taken as a lost leave), `org_overflow`, `error_type_overflow`, `attribute_overflow`, `dependency_span_cap` (a dependency call left out of its trace), `dependency_undecided` (a dependency call whose request never ended), `dependency_metric_error`, `dependency_span_error`, `dependency_metric_overflow`, `relay_overflow` (a run's process queued more dependency calls than it holds), `pass_tid_reused` (the engine repeated a pass id: see *Dependency calls*), `info_overflow` (an info gauge, such as the organization names, past its observations per collection). By design, not a loss: `server_overflow` (a pipeline server past its customer's 20 or the 200 in all: `_other`), `model_overflow` (a provider's model past its bound on the metrics: `_other`), `project_overflow` (a customer's project past the 50 on the metrics: `_other`), `dependency_error_rate_limited` (a pass kept for a failed dependency call past the guard against a flood of them), `relay_scope_cap` (a node call's relayed calls past their cap: measured, not traced), `pass_unwound` (a pass interrupted by an exception, exported unfinished when the next began), `error_log_duplicate`, `error_log_rate_limited`, `slow_rate_limited`, `caller_rate_limited` (a request past the limit on traces kept for a caller's sampled `traceparent`), `relay_late` (a node's dependency call outside any pass), `relay_unattributed` (one made on a thread the node started), `relay_global` (a node's call from its global handler, such as a key check when the run starts: measured with the node's type, in no question's trace) |
 | `db.client.operation.duration` | histogram (s) | `db.system.name` (`mysql`, `postgresql`, `redis`, …), `db.operation.name` (`SELECT`, `GET`, …, else `_OTHER`), `server.address`, `error.type` | Each database or Redis call the server makes |
 | `http.client.request.duration` | histogram (s) | `http.request.method`, `server.address`, `http.response.status_code`, `error.type` | Each HTTP request the server makes (identity provider, billing, storage APIs) |
 | `rpc.client.call.duration` | histogram (s) | `rpc.system.name=aws-api`, `rpc.service`, `rpc.method`, `error.type` | Each AWS API call the server makes |
@@ -377,6 +378,10 @@ progresses and stalls once more. A WebSocket request open for
 `{"event": "rocketride.request.overdue", "method": …, "age_s": …, "trace_id": …, "task_id": …, "connection_id": …, "org_id": …}`.
 The `rocketride.task.ended` and `rocketride.pass.stalled` lines also carry
 `project_id`; a run a signal ended carries `exit_signal` and `oom_suspected`.
+One metric collection writes at most 20 overdue-request lines and 20 stalled-pass
+lines (a hung dependency can stall thousands at once); the rest are one line with
+the same `event` and `omitted`, the number left out. Each left out is otherwise
+treated as one written (an overdue request's trace is kept).
 
 ### A run's errors in the server's log
 
@@ -404,6 +409,19 @@ line with `ts`, `level`, `logger`, `msg`, the ids, `error_code`, `exc_type` and
 
 The run's trace id is assigned when the run begins and each pass of the
 pipeline has its own, linked to the run's.
+
+Calls refused because their pipeline is not running (`TASK_NOT_REGISTERED`: its
+run was lost to an engine restart, or stopped) are written too. A run key
+(`tk_`, `pk_`) that an enabled deployment has gives a
+`rocketride.task.lost_call` line naming its `org_id`, `project_id` and `source`,
+at most one per key every 10 minutes with the `calls` since (20 lines a minute in
+all). Keys no deployment
+has (a dev run, a stale or made-up key) are added up in one
+`rocketride.task.lost_call_unknown` line every 10 minutes: `calls`,
+`distinct_keys` (`distinct_keys_capped` when that is a lower bound),
+`public_keys` and `task_keys`, and `top_keys`, the three keys that called most
+as `fingerprint:calls`. A fingerprint names a key within one server process
+only, and never shows the key.
 
 ## Tracing from your application
 
@@ -434,8 +452,8 @@ makes appears inside your trace:
 The server honours the caller's sampling decision: with an unsampled
 `traceparent`, the request is kept only when it failed or was slow, in a trace of
 its own. A sampled `traceparent` keeps the request in your trace at
-`RR_OTEL_TRACES_SAMPLE_RATIO`, up to 100 requests a minute per server process
-and 10 a minute per org; past that the request is still measured but its span is
+`RR_OTEL_TRACES_SAMPLE_RATIO`, up to `RR_OTEL_CALLER_TRACES_PER_MINUTE` requests a
+minute per server process (default 100) and a tenth of it per org; past that the request is still measured but its span is
 not kept, counted in `rocketride.telemetry.dropped` as `caller_rate_limited`.
 Failed, slow and error-logged requests are not limited by this.
 

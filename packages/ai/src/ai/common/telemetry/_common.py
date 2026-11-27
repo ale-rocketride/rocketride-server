@@ -24,8 +24,10 @@
 
 import contextlib
 import contextvars
+import json
 import random
 import re
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -147,7 +149,8 @@ _RELAY_RECORDS: Dict[str, Tuple[Dict[str, type], Dict[str, type]]] = {
         {'x': str, 'g': str, 'u': dict, 'rm': str, 't': str},
     ),
 }
-MAX_RELAYED_DROPPED = 10000  # calls one relay record may say were dropped (relay.MAX_PENDING is far below)
+MAX_RELAYED_DROPPED = 10000  # calls one relay line may say were dropped (relay.MAX_PENDING is far below)
+MAX_RELAYED_RECORDS = 128  # records read from one relay line (relay.BATCH a line, room for its drop records)
 # A model call's usage (relay.model_call) as GenAI span attributes
 _GENAI_USAGE = {
     'input': 'gen_ai.usage.input_tokens',
@@ -161,6 +164,21 @@ PROJECT_KEY = 'rocketride.project.id'  # the pipeline's project (opaque), bounde
 MAX_PIPELINE_SERVERS = 200  # distinct server.address values from pipelines; later ones are '_other'
 MAX_MARKS_PER_PASS = 8  # a node's own error reports kept on one pass (relay.node_error)
 MAX_INFLIGHT_REQUESTS = 10000  # WebSocket requests tracked as in flight; later ones are not
+MAX_LINES_PER_COLLECTION = 20  # overdue-request or stalled-pass lines one metric collection writes; then one count
+
+
+def write_json_line(line: Dict[str, Any]) -> None:
+    """One JSON error line on the server's output (the overdue-request and stalled-pass lines)."""
+    sys.stdout.write(json.dumps(line) + '\n')
+    sys.stdout.flush()
+
+
+def write_omitted_line(event: str, omitted: int) -> None:
+    """The lines one collection did not write past MAX_LINES_PER_COLLECTION: one line saying how many."""
+    if omitted > 0:
+        write_json_line({'level': 'error', 'event': event, 'omitted': omitted})
+
+
 MAX_PASS_LINKS = 32  # a run's task span links to at most this many failed or slow passes
 RAISED_MATCH_SECONDS = 10.0  # a node's raised exception names the engine's error report within this
 MAX_SERVERS_PER_ORG = 20  # of those, per customer: one customer cannot take them all
@@ -170,12 +188,15 @@ MATCH_TOLERANCE = 0.05  # seconds: a relayed call's clock vs the engine events' 
 MAX_PENDING_MEASUREMENTS = 100_000  # dependency calls waiting to be recorded (otel-deps thread)
 MEASURE_INTERVAL = 1.0  # seconds between recordings of the dependency calls
 MAX_COMPONENT_SPANS = 1000  # ceiling for RR_OTEL_COMPONENT_SPANS
-# Requests kept only because their caller sampled its trace: per process (a tenth per org)
+# Requests kept only because their caller sampled its trace: per process (a tenth per
+# org), the default of RR_OTEL_CALLER_TRACES_PER_MINUTE
 CALLER_TRACES_PER_MINUTE = 100.0
 
 # Why telemetry was dropped to stay within its bounds (rocketride.telemetry.dropped)
 DROP_REASONS = (
     'trace_queue_full',  # the export thread is behind: a sampled pipeline trace is lost
+    'export_queue_full',  # the SDK's span queue full (a collector slow or down): the oldest span waiting is lost
+    'export_failed',  # spans the collector did not take (refused, timed out, unreachable): lost
     'span_budget',  # MAX_BUFFERED_CALLS reached: a component call is left out of its trace
     'invocation_cap',  # MAX_OPEN_INVOCATIONS on one run: a call is neither traced nor timed
     'run_evicted',  # MAX_LIVE_TASKS reached: the least recently active run is forgotten
@@ -203,7 +224,7 @@ DROP_REASONS = (
     'info_overflow',  # an info gauge (telemetry.InfoGauge) past its observations per collection
     'model_overflow',  # a provider's model past MAX_MODELS_PER_PROVIDER on the metrics: '_other'
     'project_overflow',  # a customer's project past MAX_PROJECTS_PER_ORG on the metrics: '_other'
-    'caller_rate_limited',  # a request kept for its caller's sampled trace, past CALLER_TRACES_PER_MINUTE
+    'caller_rate_limited',  # a request kept for its caller's sampled trace, past RR_OTEL_CALLER_TRACES_PER_MINUTE
 )
 
 ORG_KEY = 'rocketride.org.id'

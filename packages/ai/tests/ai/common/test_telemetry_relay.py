@@ -294,6 +294,33 @@ def test_a_relayed_dropped_count_is_bounded(sink):
     assert _dropped(reader)['relay_overflow'] == _common.MAX_RELAYED_DROPPED
 
 
+def test_one_relayed_line_reports_drops_within_one_bound_and_reads_a_bounded_batch(sink):
+    telemetry, _, reader = sink
+    from ai.common.telemetry import _common
+
+    # two records each at the bound: the line together is still bounded
+    batch = [{'dropped': _common.MAX_RELAYED_DROPPED, 'reason': 'relay_overflow'}] * 2
+    telemetry.dependency_relayed('task-1', {'calls': batch}, PIPELINE)
+    assert _dropped(reader)['relay_overflow'] == _common.MAX_RELAYED_DROPPED
+    # more records than a relay line holds: the rest are counted, not read
+    telemetry.dependency_relayed('task-1', {'calls': [{}] * (_common.MAX_RELAYED_RECORDS + 5)}, PIPELINE)
+    assert _dropped(reader)['relay_overflow'] == _common.MAX_RELAYED_DROPPED + 5
+
+
+def test_a_relayed_message_is_redacted_on_the_server(sink):
+    telemetry, spans, _ = sink
+    _begin(telemetry)
+    t = time.time()
+    telemetry.component_trace('task-1', 'enter', 3, 'my_llm', t, {}, PIPELINE)
+    secret = 'refused: Authorization: Bearer abcdefghijklmnop0123'  # gitleaks:allow
+    telemetry.dependency_relayed('task-1', {'calls': [_mark(t + 0.1, g=secret)]}, PIPELINE)
+    telemetry.component_trace('task-1', 'leave', 3, 'my_llm', t + 0.5, {}, PIPELINE)
+    assert telemetry.flush_traces(5)
+    telemetry._tracer_provider.force_flush()
+    exported = repr([(s.status.description, [e.attributes for e in s.events]) for s in spans.get_finished_spans()])
+    assert 'refused: Authorization: [REDACTED]' in exported and 'abcdefghijklmnop0123' not in exported
+
+
 def _mark(when, **changes):
     record = {'k': 'err', 'x': 'provider_auth', 'g': 'refused', 'w': int(when * 1e9), 'p': 3, 'c': 'my_llm'}
     record.update(changes)
@@ -688,6 +715,25 @@ def test_a_driver_a_node_installs_with_depends_is_recorded_right_after(monkeypat
     depends('nodes/store_qdrant/requirements.txt')
     assert installed == ['nodes/store_qdrant/requirements.txt']
     assert recorded == [['nodes/store_qdrant/requirements.txt']]  # after the install, once
+
+
+def test_a_depends_py_without_its_hooks_is_said_not_silently_untraced(monkeypatch):
+    import sys
+    import types
+
+    import rocketlib
+
+    warned = []
+    monkeypatch.setattr(rocketlib, 'warning', warned.append)
+    monkeypatch.setitem(sys.modules, 'depends', types.ModuleType('depends'))  # built before the hooks
+    assert relay._watch_depends() is False
+    assert len(warned) == 1 and 'after_install_hooks' in warned[0]
+
+
+def test_the_engines_depends_py_has_its_install_hooks():
+    """The depends.py this engine runs (its dist in CI): drivers nodes install are traced only with the hooks."""
+    depends = pytest.importorskip('depends')
+    assert isinstance(depends.after_install_hooks, list)
 
 
 def test_node_classes_defined_before_install_are_named_in_one_warning(monkeypatch):

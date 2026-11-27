@@ -462,6 +462,9 @@ class ModelRecorder:
             return False  # a model call must never fail for telemetry: not instrumented
         from ai.common import telemetry
 
+        # One per process (EaaS's, or a run's relay): the last installed records.
+        # A second instrument() uninstalls the first one's recorders before, so
+        # model calls are never recorded twice; uninstall() clears only its own.
         telemetry._model_recorder = self
         self._installed = True
         return True
@@ -705,6 +708,21 @@ def instrument(
     skipped when it is missing, of another release than the SDK, or the
     library is already instrumented by someone else.
     """
+    # Called again in one process (a second Telemetry): the recorders the first
+    # call installed come out first, or every call would be recorded twice. Each
+    # recorder's uninstall() is idempotent and removes only its own wrapper.
+    for recorder in _STATE.get('recorders') or []:
+        try:
+            recorder.uninstall()
+        except Exception:
+            pass
+    # and the library instrumentations it made, or they would stay bound to its
+    # tracer provider (skipped here as already instrumented)
+    for instrumentor in _STATE.get('instrumented') or []:
+        try:
+            instrumentor.uninstrument()
+        except Exception:
+            pass
     _STATE.clear()
     _STATE.update(
         provider=tracer_provider,
@@ -714,6 +732,7 @@ def instrument(
         attempted=set(),
         missing=set(),
         recorders=[],
+        instrumented=[],
     )
     # Stable semconv names (http.request.method, url.full, ...): before any
     # instrumentation reads it. Never reaches a run (task_engine passes an
@@ -730,8 +749,23 @@ def instrument_new() -> List[str]:
         return []
     importlib.invalidate_caches()
     with _install_lock:
-        done, _skipped = _instrument_available()
+        done, skipped = _instrument_available()
+    _warn_skipped(skipped)
     return done
+
+
+def _warn_skipped(skipped: Iterable[str]) -> None:
+    """A library a node installed that cannot be traced (another release than the SDK...): said, once each."""
+    reasons = [reason for reason in skipped if not reason.endswith('not installed')]
+    if not reasons:
+        return
+    try:
+        from rocketlib import warning
+
+        for reason in reasons:
+            warning(f'telemetry: does not trace {reason}')
+    except Exception:
+        pass
 
 
 def instrument_missing() -> Tuple[List[str], List[str]]:
@@ -804,6 +838,7 @@ def _instrument_available() -> Tuple[List[str], List[str]]:
             skipped.append(f'{library}: {type(e).__name__}: {e}')
             continue
         if instrumentor.is_instrumented_by_opentelemetry:
+            _STATE['instrumented'].append(instrumentor)
             done.append(library)
         else:
             skipped.append(f'{library}: version not supported by the instrumentation')
@@ -968,6 +1003,13 @@ def _error_type(span: ReadableSpan, attributes: Dict[str, Any]) -> Optional[str]
     for event in span.events:
         if event.name == 'exception' and event.attributes and event.attributes.get('exception.type'):
             return str(event.attributes['exception.type']).rsplit('.', 1)[-1]
+    # An instrumentation on the older HTTP conventions (one a node set up before
+    # ours read OTEL_SEMCONV_STABILITY_OPT_IN) sets no error.type: its status code
+    span_attributes = span.attributes or {}
+    for key in ('http.response.status_code', 'http.status_code'):
+        status = span_attributes.get(key)
+        if isinstance(status, int) and status >= 400:
+            return str(status)
     return '_OTHER'
 
 

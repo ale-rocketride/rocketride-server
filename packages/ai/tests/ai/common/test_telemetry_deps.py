@@ -149,8 +149,8 @@ def test_a_fast_successful_request_is_dropped_but_measured(sink, db):
         {
             'http.request.method': 'GET',
             'server.address': 'api.stripe.com',
-            'server.port': '443',
-            'http.response.status_code': '200',
+            'server.port': 443,
+            'http.response.status_code': 200,
             'rocketride.dependency.origin': 'eaas',
         }
     ]
@@ -497,8 +497,8 @@ def test_real_httpx_instrumentation_joins_the_request(sink):
         {
             'http.request.method': 'GET',
             'server.address': '127.0.0.1',
-            'server.port': str(server.server_port),
-            'http.response.status_code': '503',
+            'server.port': server.server_port,
+            'http.response.status_code': 503,
             'error.type': '503',
             'rocketride.dependency.origin': 'eaas',
         }
@@ -887,7 +887,9 @@ def test_a_public_key_request_names_the_run_its_key_is_bound_to():
         _authenticated=True,
         _server=SimpleNamespace(
             _task_control={'token-b': SimpleNamespace(id='tok.b')},
-            get_task_control_by_public_key=lambda key: bound,
+            find_public_control=lambda key: bound,
+            # the lookup that counts a miss as a refused call is never used to name a run
+            get_task_control_by_public_key=lambda key: pytest.fail('counted as a refused call'),
         ),
     )
     # no token, or another run's token: still the run the key is bound to
@@ -936,6 +938,75 @@ def test_a_request_that_never_finishes_shows_in_the_gauges_and_writes_one_line(s
     assert request.error_logged  # its trace is kept when it ends
     telemetry.request_done('rrext_execute', None, 0.02, None, request)
     assert gauges().get('rocketride.ws.requests.in_flight', {}).get('rrext_execute', 0) == 0
+
+
+def test_many_overdue_requests_write_a_bounded_number_of_lines_then_a_count(sink, capsys):
+    from ai.common.telemetry import _common
+
+    telemetry, _spans, reader = sink
+    telemetry._overdue = 0.01
+    requests = [telemetry.request_scope('rrext_execute', None, {'task_id': f't{n}'})[0] for n in range(30)]
+    time.sleep(0.02)
+    reader.get_metrics_data()
+    lines = [json.loads(x) for x in capsys.readouterr().out.splitlines() if 'rocketride.request.overdue' in x]
+    assert len(lines) == _common.MAX_LINES_PER_COLLECTION + 1
+    assert lines[-1] == {'level': 'error', 'event': 'rocketride.request.overdue', 'omitted': 10}
+    assert all(r.error_logged for r in requests)  # every one's trace is kept, written or not
+    for request in requests:
+        telemetry.request_done('rrext_execute', None, 0.02, None, request)
+
+
+def test_spans_the_collector_does_not_take_or_the_full_queue_pushes_out_are_counted():
+    from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
+
+    class Down(SpanExporter):  # a collector that refuses every batch
+        def export(self, spans):
+            return SpanExportResult.FAILURE
+
+    reader = InMemoryMetricReader()
+    telemetry = Telemetry(span_exporter=Down(), metric_reader=reader, service_version='9.9.9')
+    try:
+        batch = telemetry._spans._delegate
+        tracer = telemetry._tracer
+        with tracer.start_as_current_span('request'):
+            pass
+        telemetry._tracer_provider.force_flush()
+        assert dropped(reader).get('export_failed', 0) >= 1
+        # a queue full: the oldest waiting span is pushed out, counted
+        batch._batch_processor._max_queue_size = 0
+        span = tracer.start_span('x')
+        span.end()
+        batch.on_end(span)
+        assert dropped(reader).get('export_queue_full', 0) >= 1
+    finally:
+        telemetry.shutdown(1)
+
+
+@pytest.mark.parametrize('key', ['http.response.status_code', 'http.status_code'])
+def test_a_failed_http_span_without_an_error_type_is_typed_by_its_status(key):
+    # an instrumentation on the older HTTP conventions sets no error.type
+    span = TracerProvider().get_tracer('x').start_span('GET', attributes={key: 503})
+    span.set_status(Status(StatusCode.ERROR))
+    span.end()
+    assert _deps._error_type(span, {}) == '503'
+
+
+def test_instrumenting_twice_records_each_call_once():
+    redis = pytest.importorskip('redis')
+    original = redis.Redis.execute_command
+    first, second = [], []
+    try:
+        _deps.instrument(TracerProvider(), ['redis'], first.append)
+        _deps.instrument(TracerProvider(), ['redis'], second.append)  # a second Telemetry in the process
+        client = redis.Redis(host='127.0.0.1', port=1, socket_connect_timeout=0.05)
+        with pytest.raises((redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)):
+            client.get('k')
+        assert (len(first), len(second)) == (0, 1)
+    finally:
+        for recorder in _deps._STATE.get('recorders') or []:
+            recorder.uninstall()
+        _deps._STATE.clear()
+    assert redis.Redis.execute_command is original
 
 
 def test_only_known_safe_attributes_leave_a_dependency_span():

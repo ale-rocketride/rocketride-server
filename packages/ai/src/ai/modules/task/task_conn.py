@@ -890,10 +890,8 @@ class TaskConn(
             token = args.get('token') or message.get('token')
             auth = (account.auth or '') if account is not None else ''
             if auth.startswith('pk_'):
-                try:
-                    control = self._server.get_task_control_by_public_key(auth)
-                except Exception:  # no live run for the key: the request names none
-                    control = None
+                # a lookup only: a miss names no run and is not a refused call
+                control = self._server.find_public_control(auth)
             else:
                 if auth.startswith('tk_'):
                     token = auth

@@ -120,6 +120,12 @@ async def test_keys_no_deployment_has_are_counted_in_one_summary_line(lost):
     await _settle(runs)
     record = json.loads(lines[1])
     assert (record['calls'], record['distinct_keys']) == (4, 3)
+    # which kind, and whether one key hammers: by fingerprint, never the key
+    assert (record['public_keys'], record['task_keys']) == (2, 1)
+    top = [entry.split(':') for entry in record['top_keys'].split(',')]
+    assert [int(count) for _, count in top] == [2, 1, 1]
+    assert all(len(fingerprint) == 8 for fingerprint, _ in top)
+    assert 'e' * 32 not in lines[1] and 'd' * 32 not in lines[1]
 
 
 async def test_the_registry_is_walked_at_most_every_ten_minutes(lost):
@@ -155,6 +161,25 @@ async def test_a_rebuild_reads_only_deployments_whose_version_moved(lost):
     runs.refused('pk_' + '2' * 32)
     await _settle(runs)
     assert runs._account.walks == 2 and runs._account.artifact_reads == reads
+
+
+async def test_a_registry_outage_keeps_the_known_customers_and_retries_soon(lost):
+    runs, lines, clock = lost
+    runs.refused('pk_' + '1' * 32)  # a first walk: every deployment known
+    await _settle(runs)
+    assert ACME_PK in runs._index
+
+    async def broken():  # the registry fails during the next walk
+        raise ConnectionError('registry down')
+        yield  # pragma: no cover
+
+    runs._account.deployments_iter_enabled = broken
+    clock.now += lost_runs.REBUILD_EVERY_S
+    runs.refused('pk_' + '2' * 32)
+    await _settle(runs)
+    assert ACME_PK in runs._index  # still named, not counted as unknown
+    assert not runs._stale(clock.now)
+    assert runs._stale(clock.now + lost_runs.RETRY_AFTER_S)  # tried again a minute later, not in ten
 
 
 async def test_a_task_key_is_rebuilt_with_the_engines_token_key(monkeypatch):

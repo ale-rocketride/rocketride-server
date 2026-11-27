@@ -1311,16 +1311,24 @@ async def test_start_passes_only_the_operators_options(monkeypatch, saas, startu
 
 
 @pytest.mark.asyncio
-async def test_telemetry_options_are_the_servers_never_a_pipelines(monkeypatch):
+@pytest.mark.parametrize(
+    'server_args, relay',
+    [
+        (['--otel_pass_ids', '--otel_relay=db'], True),
+        ([], False),  # telemetry off: no relay, and the run's >SPN* lines are not read
+    ],
+)
+async def test_telemetry_options_are_the_servers_never_a_pipelines(monkeypatch, server_args, relay):
     """A pipeline's --otel_* arguments are dropped, and the server's come before
-    the pipeline's own (the task reads the first --otel_relay).
+    the pipeline's own (the task reads the first --otel_relay). The run reads its
+    relayed telemetry only when the server started it with the relay.
     """
     import ai.modules.task.task_engine as engine
 
     _fake_db_account(monkeypatch)
     monkeypatch.setattr(engine, '_is_saas_engine', lambda: False)
     monkeypatch.setattr(engine, 'startup_args', lambda: [])
-    monkeypatch.setattr(engine.telemetry, 'child_arguments', lambda: ['--otel_pass_ids', '--otel_relay=db'])
+    monkeypatch.setattr(engine.telemetry, 'child_arguments', lambda: list(server_args))
     t = _env_task(pipeline={'components': [{'id': 'src', 'provider': 'tools'}]})
     t.source = 'src'
     t._env_source = AsyncMock(return_value={})
@@ -1345,7 +1353,8 @@ async def test_telemetry_options_are_the_servers_never_a_pipelines(monkeypatch):
         await Task.start_task(t)
 
     options = [a for a in spawn.call_args.args if a.lower().startswith(('--otel_', '--trace='))]
-    assert options == ['--otel_pass_ids', '--otel_relay=db', '--trace=debugOut']
+    assert options == [*server_args, '--trace=debugOut']
+    assert t._otel_relay is relay
 
 
 @pytest.mark.asyncio

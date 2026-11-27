@@ -36,9 +36,11 @@ RUN warm-wheel-cache
 # so a task with telemetry on never installs them while it runs. They load only
 # when the server starts the task with --otel_relay; with telemetry off nothing
 # imports them. The check fails the build when a package of the table is missing
-# or of another release than the SDK.
+# or of another release than the SDK, or when the engine base's depends.py predates
+# after_install_hooks (the drivers nodes install would not be traced).
 RUN ./engine -c "from ai.common.telemetry import install_sdk; install_sdk()" \
-    && ./engine -c "from ai.common.telemetry import _deps; print('otel instrumentation ok:', len(_deps.check_installed()))"
+    && ./engine -c "from ai.common.telemetry import _deps; print('otel instrumentation ok:', len(_deps.check_installed()))" \
+    && ./engine -c "import depends; assert isinstance(depends.after_install_hooks, list), 'depends.py predates after_install_hooks'"
 
 # The Launcher supplies the whole command line. tini reaps the uv processes a
 # task spawns.

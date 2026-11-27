@@ -1388,6 +1388,21 @@ def test_a_live_run_refused_its_public_key_is_not_a_lost_run(monkeypatch):
     assert refused == ['pk_gone']
 
 
+def test_looking_up_a_public_key_never_counts_a_refused_call(monkeypatch):
+    """Telemetry names a request's run with find_public_control: a miss is not a lost-run call."""
+    ts = _make_server()
+    refused = []
+    monkeypatch.setattr(ts._lost_runs, 'refused', refused.append)
+    live = SimpleNamespace(public_auth='pk_live', task=SimpleNamespace(source='webhook'))
+    ts._task_control['tk_live'] = live
+    import ai.modules.task.task_server as task_server_module
+
+    monkeypatch.setattr(task_server_module, 'public_key_reaches', lambda control: True)
+    assert ts.find_public_control('pk_live') is live
+    assert ts.find_public_control('pk_gone') is None
+    assert refused == []
+
+
 def test_live_identities_leave_out_finished_runs_still_registered():
     """A finished run stays registered for its cleanup delay: it is not in progress, so never counted lost."""
     from types import SimpleNamespace

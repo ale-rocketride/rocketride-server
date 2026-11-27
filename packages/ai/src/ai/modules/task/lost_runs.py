@@ -45,6 +45,9 @@ the run error log is (telemetry or RR_LOG_FORMAT).
 """
 
 import asyncio
+import hashlib
+import hmac
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -57,6 +60,7 @@ from . import error_log
 LINE_EVERY_S = 600.0  # one line per key every 10 minutes
 LINES_PER_MINUTE = 20  # in all, whatever the keys
 REBUILD_EVERY_S = 600.0  # a miss rebuilds the index at most every 10 minutes
+RETRY_AFTER_S = 60.0  # after a rebuild the registry answered only in part
 MAX_DEPLOYMENTS = 10000  # the registry walk stops there
 MAX_KEYS = 5000  # keys remembered between lines (a flood of made-up keys), and keys waiting for a rebuild
 FETCH_CONCURRENCY = 8  # registry reads in flight during a rebuild
@@ -106,7 +110,9 @@ class LostRuns:
         self._pending: set = set()  # keys whose line waits for the rebuild (at most MAX_KEYS)
         # Refused calls for keys no deployment has, since their last summary line
         self._unknown_calls = 0
-        self._unknown_keys: set = set()  # distinct ones (at most MAX_KEYS)
+        self._unknown_keys: Dict[str, int] = {}  # distinct ones and their calls (at most MAX_KEYS)
+        # names a key in the summary without the key: a keyed digest, its key this process's own
+        self._fingerprint_key = secrets.token_bytes(16)
         self._unknown_last: Optional[float] = None
         self._unknown_capped = False  # more distinct keys came than are kept: the count is a lower bound
         self._summary_timer: Any = None  # the summary held back by its interval, written when it is due
@@ -199,10 +205,16 @@ class LostRuns:
 
     def _count_unknown(self, key: str, calls: int) -> None:
         self._unknown_calls += calls
-        if len(self._unknown_keys) < MAX_KEYS:
-            self._unknown_keys.add(key)
-        elif key not in self._unknown_keys:
+        if key in self._unknown_keys:
+            self._unknown_keys[key] += calls
+        elif len(self._unknown_keys) < MAX_KEYS:
+            self._unknown_keys[key] = calls
+        else:
             self._unknown_capped = True
+
+    def _fingerprint(self, key: str) -> str:
+        """A key as the summary names it: 8 hex of a digest keyed by this process, never the key."""
+        return hmac.new(self._fingerprint_key, key.encode(), hashlib.sha256).hexdigest()[:8]
 
     def _summary(self, now: float) -> None:
         """One line every LINE_EVERY_S for the calls refused for keys no deployment has (none: no line)."""
@@ -212,8 +224,12 @@ class LostRuns:
             # held back: written when due, even if no other call comes
             self._schedule_summary(LINE_EVERY_S - (now - self._unknown_last))
             return
-        calls, keys, capped = self._unknown_calls, len(self._unknown_keys), self._unknown_capped
-        self._unknown_calls, self._unknown_keys, self._unknown_last, self._unknown_capped = 0, set(), now, False
+        calls, unknown, capped = self._unknown_calls, self._unknown_keys, self._unknown_capped
+        self._unknown_calls, self._unknown_keys, self._unknown_last, self._unknown_capped = 0, {}, now, False
+        keys = len(unknown)
+        public = sum(1 for key in unknown if key.startswith('pk_'))
+        # one stale client hammering, or many: the keys that called most, by fingerprint
+        top = sorted(unknown.items(), key=lambda item: -item[1])[:3]
         self._write(
             logfmt.format_line(
                 'error',
@@ -227,6 +243,9 @@ class LostRuns:
                 calls=calls,
                 distinct_keys=keys,
                 distinct_keys_capped=True if capped else None,
+                public_keys=public,
+                task_keys=keys - public,
+                top_keys=','.join(f'{self._fingerprint(key)}:{count}' for key, count in top),
             )
         )
 
@@ -279,24 +298,36 @@ class LostRuns:
         if account is None:
             from ai.account import account
         deployments = []
+        complete = True
         try:
             async for dep in account.deployments_iter_enabled():
                 if len(deployments) >= MAX_DEPLOYMENTS:
                     break
                 deployments.append(dep)
         except Exception as e:
+            complete = False
             debug(f'lost runs: the deployment registry walk stopped ({type(e).__name__}); naming what it found')
         gate = asyncio.Semaphore(FETCH_CONCURRENCY)
 
         results = await asyncio.gather(
             *(self._deployment_keys(account, dep, gate) for dep in deployments), return_exceptions=True
         )
-        by_deployment = {
-            ident: keys for ident, keys in (r for r in results if isinstance(r, tuple)) if keys is not None
-        }
+        read = [r for r in results if isinstance(r, tuple)]
+        by_deployment = {ident: keys for ident, keys in read if keys is not None}
+        if not complete or len(by_deployment) < len(deployments):
+            # The registry answered in part (the incident an engine restart may come
+            # with): what it did not answer keeps what was known, so its customers'
+            # lost runs keep their names, and the next miss after RETRY_AFTER_S tries again
+            answered = {ident[:3] for ident in by_deployment}
+            for ident, keys in self._by_deployment.items():
+                if ident[:3] not in answered:
+                    by_deployment[ident] = keys
+            built = self._clock() - REBUILD_EVERY_S + RETRY_AFTER_S
+        else:
+            built = self._clock()
         self._by_deployment = by_deployment
         self._index = {key: owner for keys in by_deployment.values() for key, owner in keys.items()}
-        self._built = self._clock()
+        self._built = built
 
     async def _deployment_keys(
         self, account: Any, dep: Dict[str, Any], gate: asyncio.Semaphore

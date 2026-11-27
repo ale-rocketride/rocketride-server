@@ -943,6 +943,19 @@ class TaskServer(DAPBase):
                 out.append({**identity(), 'task_id': str(getattr(control.task, 'id', '') or '')})
         return out
 
+    def find_public_control(self, public_auth: str) -> Optional[TASK_CONTROL]:
+        """
+        The live run a pk_ key reaches, or None. Only looks: a miss is not counted
+        as a refused call (telemetry naming a request's run must not add to the
+        lost runs).
+        """
+        # A run whose source is not a public endpoint does not answer to its pk_
+        # (see authenticate)
+        for control in self._task_control.values():
+            if control.public_auth == public_auth and public_key_reaches(control):
+                return control
+        return None
+
     def get_task_control_by_public_key(self, public_auth: str) -> TASK_CONTROL:
         """
         Retrieve task control structure with a given project/source id.
@@ -956,11 +969,9 @@ class TaskServer(DAPBase):
         Raises:
             TaskError: Code TASK_NOT_REGISTERED if the key names no live task
         """
-        # Look for it. A run whose source is not a public endpoint does not
-        # answer to its pk_ (see authenticate).
-        for control in self._task_control.values():
-            if control.public_auth == public_auth and public_key_reaches(control):
-                return control
+        control = self.find_public_control(public_auth)
+        if control is not None:
+            return control
 
         # Couldn't find it. A lost run only when no live run has the key (a live
         # run that is not a public endpoint is refused the same way, but not lost)

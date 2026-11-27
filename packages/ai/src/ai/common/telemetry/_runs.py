@@ -27,9 +27,7 @@ A part of the telemetry sink: mixed into _otel.Telemetry, whose state it uses.
 
 import contextlib
 import fnmatch
-import json
 import queue
-import sys
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -39,6 +37,9 @@ from opentelemetry.trace import Link, SpanContext, SpanKind, Status, StatusCode,
 
 
 from ._common import (
+    MAX_LINES_PER_COLLECTION,
+    write_json_line,
+    write_omitted_line,
     STATE_NAMES,
     _STATE_RUNNING,
     _LIVE_STATES,
@@ -387,8 +388,7 @@ class _RunsTelemetry:
             org = self._span_org(org_id)
             if org:
                 line['org_id'] = org
-            sys.stdout.write(json.dumps(line) + '\n')
-            sys.stdout.flush()
+            write_json_line(line)
         except Exception:
             self.count_hook_error('run_ended_log')
 
@@ -1111,8 +1111,12 @@ class _RunsTelemetry:
                 if key not in idle and now - seen > IDLE_KEY_SECONDS:
                     del self._idle_keys[key]
             keys = set(self._idle_keys)
-        for task_id, component_type, org_id, seconds, trace_id, project in stalled:
+        for task_id, component_type, org_id, seconds, trace_id, project in stalled[:MAX_LINES_PER_COLLECTION]:
             self._stall_line(task_id, component_type, org_id, seconds, trace_id, project)
+        try:
+            write_omitted_line('rocketride.pass.stalled', len(stalled) - MAX_LINES_PER_COLLECTION)
+        except Exception:
+            self.count_hook_error('pass_stalled_log')
         observations = []
         for component_type, org in keys:
             attributes = {'rocketride.component.type': component_type}
@@ -1140,7 +1144,6 @@ class _RunsTelemetry:
             org = self._span_org(org_id)
             if org:
                 line['org_id'] = org
-            sys.stdout.write(json.dumps(line) + '\n')
-            sys.stdout.flush()
+            write_json_line(line)
         except Exception:
             self.count_hook_error('pass_stalled_log')

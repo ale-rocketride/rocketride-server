@@ -237,6 +237,23 @@ def test_the_runs_first_error_is_kept_for_its_trace(log):
     assert t.first is None
 
 
+def test_a_traceback_too_long_keeps_its_exception_line_and_both_ends(log):
+    t, lines = log
+    t.stderr('Traceback (most recent call last):')
+    for n in range(error_log.MAX_TRACEBACK_LINES * 3):  # a deep recursion
+        t.stderr(f'  File "a.py", line {n}, in f')
+    t.stderr('RecursionError: maximum recursion depth exceeded')
+    t.settle()
+    (record,) = records(lines)
+    assert record['msg'] == 'RecursionError: maximum recursion depth exceeded'
+    assert record['exc_type'] == 'RecursionError'
+    exc = record['exc'].splitlines()
+    assert len(exc) <= error_log.MAX_TRACEBACK_LINES + 2 and ' lines cut ...' in record['exc']
+    assert exc[1] == '  File "a.py", line 0, in f' and exc[-2].endswith(
+        f'line {error_log.MAX_TRACEBACK_LINES * 3 - 1}, in f'
+    )
+
+
 def test_blank_lines_after_an_exception_do_not_grow_the_traceback(log):
     t, lines = log
     for line in ['Traceback (most recent call last):', '  File "a.py", line 1, in f', 'KeyError: x']:

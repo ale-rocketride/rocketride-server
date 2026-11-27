@@ -73,7 +73,7 @@ from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.metrics.view import ExponentialBucketHistogramAggregation
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 
 from ai.common import logfmt
@@ -125,6 +125,7 @@ class Telemetry(_RunsTelemetry, _RequestsTelemetry, _DependenciesTelemetry):
             slow_request_seconds=_float(environ, 'RR_OTEL_SLOW_REQUEST_SECONDS', 2.0),
             slow_request_exclude=environ.get('RR_OTEL_SLOW_REQUEST_EXCLUDE', 'rrext_cprofile_*'),
             slow_traces_per_minute=_float(environ, 'RR_OTEL_SLOW_TRACES_PER_MINUTE', 100.0),
+            caller_traces_per_minute=_float(environ, 'RR_OTEL_CALLER_TRACES_PER_MINUTE', CALLER_TRACES_PER_MINUTE),
             component_span_cap=int(_float(environ, 'RR_OTEL_COMPONENT_SPANS', 200)),
             org_attribute=_truthy(environ.get('RR_OTEL_ORG_ATTRIBUTE')),
             org_cardinality=int(_float(environ, 'RR_OTEL_ORG_CARDINALITY', 2000)),
@@ -145,6 +146,7 @@ class Telemetry(_RunsTelemetry, _RequestsTelemetry, _DependenciesTelemetry):
         slow_request_seconds: float = 0.0,
         slow_request_exclude: str = '',
         slow_traces_per_minute: float = 100.0,
+        caller_traces_per_minute: float = CALLER_TRACES_PER_MINUTE,
         component_span_cap: int = 200,
         org_attribute: bool = False,
         org_cardinality: int = 2000,
@@ -168,9 +170,9 @@ class Telemetry(_RunsTelemetry, _RequestsTelemetry, _DependenciesTelemetry):
         self._slow_limit = _SlowLimiter(slow_traces_per_minute)
         self._dependency_error_limit = _SlowLimiter(slow_traces_per_minute)
         # A caller's sampled traceparent keeps the request's span in the caller's
-        # trace, but a caller cannot choose how many: CALLER_TRACES_PER_MINUTE per
-        # process, a tenth of it per org
-        self._caller_limit = _SlowLimiter(CALLER_TRACES_PER_MINUTE)
+        # trace, but a caller cannot choose how many: RR_OTEL_CALLER_TRACES_PER_MINUTE
+        # per process (the operator's, never the caller's), a tenth of it per org
+        self._caller_limit = _SlowLimiter(caller_traces_per_minute)
         self._span_cap = min(MAX_COMPONENT_SPANS, max(0, component_span_cap))
         # The org id on metrics (opt-in: up to RR_OTEL_ORG_CARDINALITY orgs times each
         # metric's attribute sets); spans and error lines always carry it (no series)
@@ -234,7 +236,9 @@ class Telemetry(_RunsTelemetry, _RequestsTelemetry, _DependenciesTelemetry):
         )
         # Dependency calls wait in front of the exporter for their trace's decision
         self._spans = _deps.DependencyBuffer(
-            BatchSpanProcessor(span_exporter or OTLPSpanExporter()),
+            _CountedBatch(
+                _CountedExporter(span_exporter or OTLPSpanExporter(), self.count_dropped), self.count_dropped
+            ),
             SCOPE,
             keep_root=self._keep_dependency_root,
             measure=lambda name, seconds, attributes: self._queue_measurement(
@@ -356,9 +360,10 @@ class Telemetry(_RunsTelemetry, _RequestsTelemetry, _DependenciesTelemetry):
         )
 
         # Lifetime bounds on the attribute sets of the per-customer SLI metrics: per
-        # org (sized by the org cap), then '_other' (counted as attribute_overflow)
+        # org (sized by the org cap) when the org label is on, then '_other'
+        # (counted as attribute_overflow)
         for name, per_org in SLI_SETS_PER_ORG.items():
-            self._set_limits[name] = max(MAX_ATTRIBUTE_SETS, (self._org_cap + 2) * per_org)
+            self._set_limits[name] = self._sets_limit(per_org)
 
         for run_kind in RUN_KINDS:
             self._started.add(0, {'rocketride.task.run_kind': run_kind})
@@ -441,13 +446,25 @@ class Telemetry(_RunsTelemetry, _RequestsTelemetry, _DependenciesTelemetry):
         return value
 
     def _with_org(self, attributes: Dict[str, Any], org_id: Any, project: Any = None) -> Dict[str, Any]:
-        """A metric's org id (bounded, when on), and with a project, its project id (MAX_PROJECTS_PER_ORG per org)."""
+        """
+        With the org label on, a metric's org id (bounded) and, with a project, its
+        project id (MAX_PROJECTS_PER_ORG per org). Off, neither: a project id names
+        one customer as surely as the org id does.
+        """
+        if not self._org_attribute:
+            return attributes
         org = self._capped_org(org_id)
-        if org is not None and self._org_attribute:
+        if org is not None:
             attributes[ORG_KEY] = org
         if project:
             attributes[PROJECT_KEY] = self._bounded_project(org or '', str(project)[:MAX_VALUE_LENGTH])
         return attributes
+
+    def _sets_limit(self, sets_per_org: int) -> int:
+        """A metric's lifetime attribute sets: sets_per_org for each org, '_other' and none when the org label is on."""
+        if not self._org_attribute:
+            return MAX_ATTRIBUTE_SETS
+        return max(MAX_ATTRIBUTE_SETS, (self._org_cap + 2) * sets_per_org)
 
     def _bounded_project(self, org: str, project: str) -> str:
         """A pipeline's project id as metrics keep it: MAX_PROJECTS_PER_ORG per customer, then '_other'."""
@@ -507,9 +524,9 @@ class Telemetry(_RunsTelemetry, _RequestsTelemetry, _DependenciesTelemetry):
         return self._meter.create_observable_gauge(name, [callback], unit, description)
 
     def size_attribute_sets(self, name: str, sets_per_org: int) -> None:
-        """Bound a metric's lifetime attribute sets by the org cap: sets_per_org for each org, '_other' and none."""
+        """Bound a metric's lifetime attribute sets by the org cap (see _sets_limit)."""
         with self._lock:
-            self._set_limits[name] = max(MAX_ATTRIBUTE_SETS, (self._org_cap + 2) * sets_per_org)
+            self._set_limits[name] = self._sets_limit(sets_per_org)
 
     def set_span_attributes(self, attributes: Mapping[str, Any]) -> None:
         """Attributes for the current request's span (set on it if it is kept)."""
@@ -697,3 +714,50 @@ def _check_transport(environ: Mapping[str, str]) -> str:
     )
     bridge.validate_transport_security(settings, environ)
     return bridge.redact_endpoint(bridge.effective_endpoint(settings, environ, 'traces'))
+
+
+class _CountedExporter(SpanExporter):
+    """
+    The span exporter, counting what the collector did not take (refused, timed
+    out, unreachable) as export_failed: the SDK drops those spans without a count.
+    """
+
+    def __init__(self, exporter: SpanExporter, count_dropped: Callable[..., None]):
+        self._exporter = exporter
+        self._count_dropped = count_dropped
+
+    def export(self, spans):
+        result = self._exporter.export(spans)
+        if result is not SpanExportResult.SUCCESS:
+            try:
+                self._count_dropped('export_failed', len(spans))
+            except Exception:
+                pass
+        return result
+
+    def shutdown(self) -> None:
+        self._exporter.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self._exporter.force_flush(timeout_millis)
+
+
+class _CountedBatch(BatchSpanProcessor):
+    """
+    The batch processor, counting the spans its full queue pushes out (a collector
+    too slow or down) as export_queue_full: the SDK counts them only with its own
+    internal metrics on.
+    """
+
+    def __init__(self, exporter: SpanExporter, count_dropped: Callable[..., None]):
+        super().__init__(exporter)
+        self._count_dropped = count_dropped
+
+    def on_end(self, span) -> None:
+        try:
+            batch = self._batch_processor
+            if len(batch._queue) >= batch._max_queue_size:
+                self._count_dropped('export_queue_full')
+        except Exception:
+            pass  # another SDK's internals: no count, the span still goes on
+        super().on_end(span)

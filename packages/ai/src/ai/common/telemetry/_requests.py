@@ -26,8 +26,6 @@ A part of the telemetry sink: mixed into _otel.Telemetry, whose state it uses.
 """
 
 import fnmatch
-import json
-import sys
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -39,6 +37,9 @@ from opentelemetry.trace import Link, SpanContext, SpanKind, Status, StatusCode,
 from . import _deps
 
 from ._common import (
+    MAX_LINES_PER_COLLECTION,
+    write_json_line,
+    write_omitted_line,
     _ERROR_CODE,
     MAX_VALUE_LENGTH,
     _WS_CLIENTS,
@@ -172,7 +173,7 @@ class _RequestsTelemetry:
             end = time.time()
             # semconv rpc-spans: the span is named after the method
             span = self._tracer.start_span(
-                attributes['rpc.method'],
+                _span_name(attributes),
                 context=parent,
                 kind=SpanKind.SERVER,
                 start_time=_ns(end - duration),
@@ -200,7 +201,7 @@ class _RequestsTelemetry:
         """The kept request's SERVER span (with its preset ids) and a CLIENT span per database/Redis call."""
         with _preset_ids(request.trace_id, request.span_id):
             span = self._tracer.start_span(
-                attributes['rpc.method'],
+                _span_name(attributes),
                 context=request.parent,
                 kind=SpanKind.SERVER,
                 start_time=request.start_ns,
@@ -248,8 +249,14 @@ class _RequestsTelemetry:
                         # before the lock is released: a request ending now keeps its trace
                         request.error_logged = True
                     overdue.append((method, age, identity, request))
-        for method, age, identity, request in overdue:
+        # a hung dependency can make thousands overdue at once: a bounded number of
+        # lines (every one's trace is still kept), then how many were left out
+        for method, age, identity, request in overdue[:MAX_LINES_PER_COLLECTION]:
             self._overdue_line(method, age, identity, request)
+        try:
+            write_omitted_line('rocketride.request.overdue', len(overdue) - MAX_LINES_PER_COLLECTION)
+        except Exception:
+            self.count_hook_error('request_overdue_log')
         return [Observation(round(age), {'rpc.method': method}) for method, age in oldest.items()]
 
     def _overdue_line(self, method: str, age: float, identity: Mapping[str, Any], request: Any) -> None:
@@ -269,8 +276,7 @@ class _RequestsTelemetry:
             org = self._span_org(identity.get('org_id'))
             if org:
                 line['org_id'] = org
-            sys.stdout.write(json.dumps(line) + '\n')
-            sys.stdout.flush()
+            write_json_line(line)
         except Exception:
             self.count_hook_error('request_overdue_log')
 
@@ -282,3 +288,9 @@ class _RequestsTelemetry:
             return [Observation(int(count()))]
         except Exception:
             return []
+
+
+def _span_name(attributes: Mapping[str, Any]) -> str:
+    """The span name (semconv rpc-spans): the method, or the RPC system's name for one it does not know (_OTHER)."""
+    method = attributes.get('rpc.method') or '_OTHER'
+    return attributes.get('rpc.system.name', 'rocketride_dap') if method == '_OTHER' else method
